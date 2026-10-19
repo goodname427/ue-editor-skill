@@ -1387,3 +1387,438 @@ FString UAgentSlateDriverFunctionLib::TypeText(const FString& Text)
 	});
 	return SDResult(true, FString(), ExtraFields);
 }
+
+// ==================== 按住 / 抬起 / 移动 ====================
+
+enum class ESDStep : uint8
+{
+	Running,
+	Done,
+	Failed,
+};
+
+// 时间线一步：Run 每帧调用一次直到不再是 Running；RequestId 用于取消时补写结果
+struct FSDTimelineStep
+{
+	int32 RequestId = 0;
+	TFunction<ESDStep()> Run;
+};
+
+static TArray<FSDTimelineStep> SDTimeline;
+static bool bSDTimelineTicking = false;
+
+static TMap<FKey, FKeyEvent> SDHeldKeys;
+static TSet<FKey> SDHeldButtons;
+// 每次按下递增；看门狗只抬起自己那次按下，不误抬已经抬起又重新按下的键
+static TMap<FKey, int32> SDHoldSerials;
+static int32 SDNextHoldSerial = 0;
+static TOptional<FVector2D> SDPointerPos;
+
+static bool SDIsPending(int32 RequestId)
+{
+	const FString* Result = SDInputResults.Find(RequestId);
+	return Result && Result->Contains(TEXT("\"pending\":true"));
+}
+
+static void SDSetInputResult(int32 RequestId, bool bSuccess, const FString& Message, TArray<FString> Fields = TArray<FString>())
+{
+	if (RequestId != 0 && SDInputResults.Contains(RequestId))
+	{
+		Fields.Insert(AgentJson::PairBool(TEXT("pending"), false), 0);
+		SDInputResults[RequestId] = SDResult(bSuccess, Message, Fields);
+	}
+}
+
+static void SDCancelTimeline(const FString& Message)
+{
+	for (const FSDTimelineStep& Step : SDTimeline)
+	{
+		if (SDIsPending(Step.RequestId))
+		{
+			SDSetInputResult(Step.RequestId, false, Message);
+		}
+	}
+	SDTimeline.Empty();
+}
+
+// 每帧最多完成一步，相邻两步之间至少隔一帧（按下与抬起不会落在同一帧）
+static bool SDTickTimeline(float)
+{
+	if (!FSlateApplication::IsInitialized() || SDTimeline.Num() == 0)
+	{
+		SDTimeline.Empty();
+		bSDTimelineTicking = false;
+		return false;
+	}
+	ESDStep State = ESDStep::Running;
+	SDWithBackgroundInput([&](FSlateApplication&)
+	{
+		State = SDTimeline[0].Run();
+	});
+	if (State != ESDStep::Running && SDTimeline.Num() > 0)
+	{
+		SDTimeline.RemoveAt(0);
+		if (State == ESDStep::Failed)
+		{
+			SDCancelTimeline(TEXT("Cancelled because an earlier queued input failed"));
+		}
+	}
+	if (SDTimeline.Num() == 0)
+	{
+		bSDTimelineTicking = false;
+		return false;
+	}
+	return true;
+}
+
+static void SDTimelineAdd(int32 RequestId, TFunction<ESDStep()> Run)
+{
+	SDTimeline.Add({RequestId, MoveTemp(Run)});
+	if (!bSDTimelineTicking)
+	{
+		bSDTimelineTicking = true;
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateStatic(&SDTickTimeline));
+	}
+}
+
+static TFunction<ESDStep()> SDWaitStep(float Seconds)
+{
+	const TSharedRef<double> Start = MakeShared<double>(-1.0);
+	return [Start, Seconds]()
+	{
+		const double Now = FPlatformTime::Seconds();
+		if (*Start < 0.0)
+		{
+			*Start = Now;
+		}
+		return Now - *Start >= Seconds ? ESDStep::Done : ESDStep::Running;
+	};
+}
+
+static FVector2D SDPointer()
+{
+	return SDPointerPos.IsSet() ? SDPointerPos.GetValue() : FSlateApplication::Get().GetCursorPos();
+}
+
+static FKeyEvent SDMakeKeyEvent(const FKey& Key, bool bCtrl, bool bShift, bool bAlt)
+{
+	const uint32* KeyCodePtr = nullptr;
+	const uint32* CharCodePtr = nullptr;
+	FInputKeyManager::Get().GetCodesFromKey(Key, KeyCodePtr, CharCodePtr);
+	const FModifierKeysState ModifierKeys(bShift, false, bCtrl, false, bAlt, false, false, false, false);
+	const uint32 UserIndex = static_cast<uint32>(FSlateApplication::Get().GetUserIndexForKeyboard());
+	return FKeyEvent(Key, ModifierKeys, UserIndex, false, CharCodePtr ? *CharCodePtr : 0, KeyCodePtr ? *KeyCodePtr : 0);
+}
+
+static void SDReleaseKey(const FKey& Key)
+{
+	FKeyEvent Event;
+	if (SDHeldKeys.RemoveAndCopyValue(Key, Event))
+	{
+		SDHoldSerials.Remove(Key);
+		FSlateApplication::Get().ProcessKeyUpEvent(Event);
+	}
+}
+
+static void SDReleaseButton(const FKey& Button)
+{
+	if (SDHeldButtons.Remove(Button) > 0)
+	{
+		SDHoldSerials.Remove(Button);
+		const FVector2D Pos = SDPointer();
+		FSlateApplication::Get().ProcessMouseButtonUpEvent(SDMakePointerEvent(Pos, Pos, SDHeldButtons, Button, 0.0f));
+	}
+}
+
+static void SDArmWatchdog(const FKey& Key, int32 Serial, float MaxHoldSeconds)
+{
+	if (MaxHoldSeconds <= 0.f)
+	{
+		return;
+	}
+	const double Deadline = FPlatformTime::Seconds() + MaxHoldSeconds;
+	FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Key, Serial, Deadline](float)
+	{
+		if (FPlatformTime::Seconds() < Deadline)
+		{
+			return true;
+		}
+		const int32* Current = SDHoldSerials.Find(Key);
+		if (FSlateApplication::IsInitialized() && Current && *Current == Serial)
+		{
+			SDWithBackgroundInput([&](FSlateApplication&)
+			{
+				if (Key.IsMouseButton())
+				{
+					SDReleaseButton(Key);
+				}
+				else
+				{
+					SDReleaseKey(Key);
+				}
+			});
+		}
+		return false;
+	}));
+}
+
+FString UAgentSlateDriverFunctionLib::KeyDown(const FString& KeyName, bool bCtrl, bool bShift, bool bAlt, float HoldSeconds, float MaxHoldSeconds)
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return SDResult(false, TEXT("Slate is not initialized"));
+	}
+	const FKey Key(*KeyName);
+	if (!Key.IsValid())
+	{
+		return SDResult(false, FString::Printf(TEXT("Unknown key: %s"), *KeyName));
+	}
+	if (Key.IsMouseButton())
+	{
+		return SDResult(false, TEXT("Mouse buttons go through MouseDown"));
+	}
+	const int32 RequestId = SDRegisterInput();
+	TArray<FString> ExtraFields;
+	ExtraFields.Add(AgentJson::PairRaw(TEXT("focus"), SDDescribeFocus()));
+	ExtraFields.Add(AgentJson::PairInt(TEXT("request_id"), RequestId));
+	const bool bTimed = HoldSeconds > 0.f;
+	SDTimelineAdd(RequestId, [Key, bCtrl, bShift, bAlt, MaxHoldSeconds, bTimed, RequestId]()
+	{
+		if (SDHeldKeys.Contains(Key))
+		{
+			SDSetInputResult(RequestId, false, TEXT("Key is already held; release it first"));
+			return ESDStep::Failed;
+		}
+		const FKeyEvent Event = SDMakeKeyEvent(Key, bCtrl, bShift, bAlt);
+		const bool bHandled = FSlateApplication::Get().ProcessKeyDownEvent(Event);
+		SDHeldKeys.Add(Key, Event);
+		const int32 Serial = ++SDNextHoldSerial;
+		SDHoldSerials.Add(Key, Serial);
+		SDArmWatchdog(Key, Serial, MaxHoldSeconds);
+		if (!bTimed)
+		{
+			SDSetInputResult(RequestId, true, FString(), {AgentJson::PairBool(TEXT("handled"), bHandled)});
+		}
+		return ESDStep::Done;
+	});
+	if (bTimed)
+	{
+		SDTimelineAdd(RequestId, SDWaitStep(HoldSeconds));
+		SDTimelineAdd(RequestId, [Key, HoldSeconds, RequestId]()
+		{
+			SDReleaseKey(Key);
+			SDSetInputResult(RequestId, true, FString(), {AgentJson::PairFloat(TEXT("held_seconds"), HoldSeconds)});
+			return ESDStep::Done;
+		});
+	}
+	return SDResult(true, FString(), ExtraFields);
+}
+
+FString UAgentSlateDriverFunctionLib::KeyUp(const FString& KeyName)
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return SDResult(false, TEXT("Slate is not initialized"));
+	}
+	const FKey Key(*KeyName);
+	if (!Key.IsValid())
+	{
+		return SDResult(false, FString::Printf(TEXT("Unknown key: %s"), *KeyName));
+	}
+	const int32 RequestId = SDRegisterInput();
+	SDTimelineAdd(RequestId, [Key, RequestId]()
+	{
+		if (!SDHeldKeys.Contains(Key))
+		{
+			SDSetInputResult(RequestId, false, TEXT("Key is not held by AgentTools (already released, or auto released after MaxHoldSeconds)"));
+			return ESDStep::Failed;
+		}
+		SDReleaseKey(Key);
+		SDSetInputResult(RequestId, true, FString());
+		return ESDStep::Done;
+	});
+	return SDResult(true, FString(), {AgentJson::PairInt(TEXT("request_id"), RequestId)});
+}
+
+FString UAgentSlateDriverFunctionLib::MouseDown(const FString& Locator, const FString& WindowFilter, int32 MatchIndex, float X, float Y, const FString& Button, float HoldSeconds, float MaxHoldSeconds)
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return SDResult(false, TEXT("Slate is not initialized"));
+	}
+	const FKey ButtonKey = SDParseMouseButton(Button);
+	if (!ButtonKey.IsValid())
+	{
+		return SDResult(false, FString::Printf(TEXT("Unknown mouse button: %s"), *Button));
+	}
+	FVector2D Pos(X, Y);
+	TWeakPtr<SWidget> Target;
+	const bool bHasTarget = !Locator.IsEmpty();
+	TArray<FString> ExtraFields;
+	if (bHasTarget)
+	{
+		const FSDLocator ParsedLocator = SDParseLocator(Locator);
+		TArray<FSDMatch> Matches;
+		if (!ParsedLocator.IsEmpty())
+		{
+			SDFindMatches(ParsedLocator, WindowFilter, Matches);
+		}
+		ExtraFields.Add(AgentJson::PairInt(TEXT("match_count"), Matches.Num()));
+		if (!Matches.IsValidIndex(MatchIndex))
+		{
+			return SDResult(false, FString::Printf(TEXT("No widget at match index %d"), MatchIndex), ExtraFields);
+		}
+		const FSDMatch& Match = Matches[MatchIndex];
+		ExtraFields.Add(AgentJson::PairRaw(TEXT("target"), SDMatchJson(Match)));
+		Pos = Match.Info.Pos + Match.Info.Size * 0.5;
+		Target = Match.Widget;
+	}
+	const int32 RequestId = SDRegisterInput();
+	ExtraFields.Add(AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)));
+	ExtraFields.Add(AgentJson::PairRaw(TEXT("hit"), SDDescribeHit(Pos)));
+	ExtraFields.Add(AgentJson::PairInt(TEXT("request_id"), RequestId));
+	const bool bTimed = HoldSeconds > 0.f;
+	SDTimelineAdd(RequestId, [ButtonKey, Pos, Target, bHasTarget, MaxHoldSeconds, bTimed, RequestId]()
+	{
+		if (SDHeldButtons.Contains(ButtonKey))
+		{
+			SDSetInputResult(RequestId, false, TEXT("Mouse button is already held; release it first"));
+			return ESDStep::Failed;
+		}
+		FSlateApplication& SlateApp = FSlateApplication::Get();
+		FWidgetPath Path = SlateApp.LocateWindowUnderMouse(Pos, SlateApp.GetInteractiveTopLevelWindows(), false, static_cast<uint32>(SlateApp.GetUserIndexForMouse()));
+		if (!Path.IsValid())
+		{
+			SDSetInputResult(RequestId, false, TEXT("No window under the pointer"));
+			return ESDStep::Failed;
+		}
+		const FArrangedWidget& Top = Path.Widgets.Last();
+		const FString Hit = AgentJson::PairRaw(TEXT("hit"), SDDescribeWidget(Top.Widget, Top.Geometry));
+		if (bHasTarget)
+		{
+			const TSharedPtr<SWidget> TargetWidget = Target.Pin();
+			const TSharedPtr<SWidget> TopWidget = Top.Widget;
+			if (!TargetWidget.IsValid() || !TargetWidget->GetVisibility().IsVisible() || !(TopWidget == TargetWidget || SDIsAncestorOf(TargetWidget, TopWidget)))
+			{
+				SDSetInputResult(RequestId, false, TEXT("Target check failed: the topmost widget at the press point is neither the target nor its child; it is probably covered or hit-test invisible, so no mouse down was sent"), {Hit});
+				return ESDStep::Failed;
+			}
+		}
+		SlateApp.ProcessMouseMoveEvent(SDMakePointerEvent(Pos, SDPointer(), SDHeldButtons, EKeys::Invalid, 0.0f));
+		SDPointerPos = Pos;
+		SDHeldButtons.Add(ButtonKey);
+		SlateApp.ProcessMouseButtonDownEvent(Path.GetWindow()->GetNativeWindow(), SDMakePointerEvent(Pos, Pos, SDHeldButtons, ButtonKey, 0.0f));
+		const int32 Serial = ++SDNextHoldSerial;
+		SDHoldSerials.Add(ButtonKey, Serial);
+		SDArmWatchdog(ButtonKey, Serial, MaxHoldSeconds);
+		if (!bTimed)
+		{
+			SDSetInputResult(RequestId, true, FString(), {Hit});
+		}
+		return ESDStep::Done;
+	});
+	if (bTimed)
+	{
+		SDTimelineAdd(RequestId, SDWaitStep(HoldSeconds));
+		SDTimelineAdd(RequestId, [ButtonKey, HoldSeconds, RequestId]()
+		{
+			SDReleaseButton(ButtonKey);
+			SDSetInputResult(RequestId, true, FString(), {AgentJson::PairFloat(TEXT("held_seconds"), HoldSeconds)});
+			return ESDStep::Done;
+		});
+	}
+	return SDResult(true, FString(), ExtraFields);
+}
+
+FString UAgentSlateDriverFunctionLib::MouseUp(const FString& Button)
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return SDResult(false, TEXT("Slate is not initialized"));
+	}
+	const FKey ButtonKey = SDParseMouseButton(Button);
+	if (!ButtonKey.IsValid())
+	{
+		return SDResult(false, FString::Printf(TEXT("Unknown mouse button: %s"), *Button));
+	}
+	const int32 RequestId = SDRegisterInput();
+	SDTimelineAdd(RequestId, [ButtonKey, RequestId]()
+	{
+		if (!SDHeldButtons.Contains(ButtonKey))
+		{
+			SDSetInputResult(RequestId, false, TEXT("Mouse button is not held by AgentTools (already released, or auto released after MaxHoldSeconds)"));
+			return ESDStep::Failed;
+		}
+		const FVector2D Pos = SDPointer();
+		SDReleaseButton(ButtonKey);
+		SDSetInputResult(RequestId, true, FString(), {AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)), AgentJson::PairRaw(TEXT("hit"), SDDescribeHit(Pos))});
+		return ESDStep::Done;
+	});
+	return SDResult(true, FString(), {AgentJson::PairInt(TEXT("request_id"), RequestId)});
+}
+
+FString UAgentSlateDriverFunctionLib::MouseMove(float X, float Y, int32 Frames)
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return SDResult(false, TEXT("Slate is not initialized"));
+	}
+	const FVector2D To(X, Y);
+	const int32 StepCount = FMath::Max(1, Frames);
+	const int32 RequestId = SDRegisterInput();
+	const TSharedRef<FVector2D> From = MakeShared<FVector2D>(FVector2D::ZeroVector);
+	const TSharedRef<int32> Step = MakeShared<int32>(0);
+	SDTimelineAdd(RequestId, [To, StepCount, From, Step, RequestId]()
+	{
+		// 起点在执行时取：前面排着的按下/移动完成后才知道指针在哪
+		if (*Step == 0)
+		{
+			*From = SDPointer();
+		}
+		++*Step;
+		const FVector2D Last = SDPointer();
+		const FVector2D Pos = FMath::Lerp(*From, To, static_cast<double>(*Step) / StepCount);
+		FSlateApplication::Get().ProcessMouseMoveEvent(SDMakePointerEvent(Pos, Last, SDHeldButtons, EKeys::Invalid, 0.0f));
+		SDPointerPos = Pos;
+		if (*Step < StepCount)
+		{
+			return ESDStep::Running;
+		}
+		SDSetInputResult(RequestId, true, FString(), {AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)), AgentJson::PairRaw(TEXT("hit"), SDDescribeHit(Pos)),
+			AgentJson::PairBool(TEXT("dragging"), SDHeldButtons.Num() > 0)});
+		return ESDStep::Done;
+	});
+	return SDResult(true, FString(), {AgentJson::PairInt(TEXT("request_id"), RequestId)});
+}
+
+FString UAgentSlateDriverFunctionLib::ReleaseAllInput()
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return SDResult(false, TEXT("Slate is not initialized"));
+	}
+	const int32 RequestId = SDRegisterInput();
+	// 不排进时间线：时间线上可能正有一步按住等待，紧急释放要立即生效
+	SDQueueInput([RequestId]()
+	{
+		SDCancelTimeline(TEXT("Cancelled by ReleaseAllInput"));
+		TArray<FString> Released;
+		TArray<FKey> Keys;
+		SDHeldKeys.GetKeys(Keys);
+		Keys.Append(SDHeldButtons.Array());
+		for (const FKey& Key : Keys)
+		{
+			Released.Add(TEXT("\"") + AgentJson::EscapeString(Key.GetFName().ToString()) + TEXT("\""));
+			if (Key.IsMouseButton())
+			{
+				SDReleaseButton(Key);
+			}
+			else
+			{
+				SDReleaseKey(Key);
+			}
+		}
+		SDSetInputResult(RequestId, true, FString(), {AgentJson::PairRaw(TEXT("released"), AgentJson::Array(Released))});
+	});
+	return SDResult(true, FString(), {AgentJson::PairInt(TEXT("request_id"), RequestId)});
+}

@@ -27,7 +27,7 @@ python scripts/ue_cli.py discover                              # 确认编辑器
 ```
 
 - 多行代码写成 `.py` 用 `--file`；`exec` 成功时直接输出脚本 `print` 的文本，失败时输出 JSON 且退出码为 1。
-- 常用操作先找 Lib：`api`（API 内省）、`pie`、`open_asset`、`wbp_edit`（改 WBP 与编译保存）、`asset_move`（批量移动资产）；界面兜底用 `ui`（查看与操作界面）。用法见各脚本 docstring。
+- 常用操作先找 Lib：`api`（API 内省）、`pie`、`open_asset`、`wbp_edit`（改 WBP 与编译保存）、`asset_move`（批量移动资产）；界面兜底用 `ui`（查看与操作界面，含点击、长按、按住/抬起、拖动、输入）。用法见各脚本 docstring。
 - 返回 `Timeout` 时编辑器可能仍在执行，**不要重发**。
 
 ## 分层
@@ -37,7 +37,7 @@ python scripts/ue_cli.py discover                              # 确认编辑器
 | CLI / Bridge | `scripts/ue_cli.py`、`ue_bridge.py`、`ue_log.py` | 入口与传输；本地截图、日志观察、跨帧等待、编码与超时 |
 | Lib | `scripts/lib/*.py`、`*.sequence.json` | 常用 Python 动作与跨帧步骤清单，只组合现有接口 |
 | Reference | `references/*.md` | 接口与用法文档，按需读取 |
-| AgentTools | 工程插件 `Plugins/AgentTools`（安装器从本仓库链接进工程） | Python 访问不到的 C++ 能力（Slate 读取与输入、Widget 蓝图编辑），仅编辑器 |
+| AgentTools | 工程插件 `Plugins/AgentTools`（安装器从本仓库链接进工程） | Python 访问不到的 C++ 能力（Slate 读取与输入、Widget 蓝图编辑），仅编辑器。改了函数体用 Live Coding；新增或改了 `UFUNCTION` 签名要重启编辑器 |
 
 ## 项目 Lib / Reference 的积累
 

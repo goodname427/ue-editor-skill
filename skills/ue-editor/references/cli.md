@@ -46,13 +46,13 @@ python scripts/ue_cli.py exec --file do_rename.py --timeout 300             # �
 |------|------|
 | `name` | 用于进度与失败诊断的步骤名 |
 | `file` / `lib` / `code` | 三选一：项目脚本、Skill Python Lib 名或 Python 源码 |
-| `args` / `options` | 注入脚本 `ARGS` 列表 / `OPTS` 对象，默认空 |
+| `args` / `options` | 注入脚本 `ARGS` 列表 / `OPTS` 对象，默认空；整个值写成 `"{名字}"` 时替换成 `--param 名字=值`（缺参数启动前就报错） |
 | `wait_before` | 执行动作前轮询的 Python 表达式；省略即直接执行 |
 | `wait_until` | 动作执行后轮询表达式；省略即不等待 |
 | `state` | 等待超时或执行异常时读取的诊断表达式，可返回世界、当前状态等 |
 | `wait` | 每个等待阶段最长秒数，默认 60，范围 0~3600 |
 
-脚本相对路径以清单所在目录为准。`--param` 值始终是字符串，以 `SEQUENCE_PARAMS` 注入脚本/条件所在的编辑器全局上下文，不做字符串插值或命令拼接；参数在每步执行前等待之前安装。首步等待所用函数需已定义，或用直接查询表达式；不能依赖尚未执行的同一步脚本定义——`wait_before` 出现 `NameError` 时 CLI 会在 `hint` 里提示这一点。
+脚本相对路径以清单所在目录为准。`--param` 值始终是字符串，以 `SEQUENCE_PARAMS` 注入脚本/条件所在的编辑器全局上下文；除了上面 `args` / `options` / `wait_before` / `wait_until` / `state` 里整值为 `"{名字}"` 的整体替换，不做其它字符串插值或命令拼接。参数在每步执行前等待之前安装。首步等待所用函数需已定义，或用直接查询表达式；不能依赖尚未执行的同一步脚本定义——`wait_before` 出现 `NameError` 时 CLI 会在 `hint` 里提示这一点。前面步骤发过输入、后面某步失败时，CLI 会调用 `release_all_input` 放开按住的键（结果里 `input_released`）。
 
 - 所有文件、字段和语法在连接/动作前校验；条件必须只读、不发请求、不修改业务状态。就绪判据由项目提供，不能仅用 `PIE running` 代替客户端或业务就绪。
 - 动作每步只发一次；每 0.5 秒轮询条件。已完成状态的跳过由项目脚本自行判断，CLI 不自动重试、回滚、重连重放或替换账号；超时后先检查现场，不直接重跑整份清单。
@@ -71,7 +71,8 @@ python scripts/ue_cli.py exec --file do_rename.py --timeout 300             # �
 | `open_asset` | 打开资产编辑器（WBP 设计器、蓝图等） |
 | `wbp_edit` | 改 WBP 并把改动落盘：`list` / `rename` / `set` / `add` / `replace` / `remove` / `save`；改控件默认编译保存，`--no-save` 攒下的改动用 `save` 统一收尾 |
 | `asset_move` | 批量移动/改名资产与引用检查：`check` 先看存在性与引用方，`move` 移动（`--save-referencers`），`redirectors <目录>` 列旧路径残留 |
-| `ui` | 查看与操作编辑器界面：`windows` / `tree` / `find` / `focus` / `click` / `type` / `key` / `scroll`（依赖 AgentTools） |
+| `ui` | 查看与操作编辑器界面：`windows` / `tree` / `find` / `focus` / `click` / `type` / `key` / `scroll` / `keydown` / `keyup` / `mousedown` / `mouseup` / `move` / `drag` / `release`（依赖 AgentTools） |
+| `hold-until.sequence.json` | 按住一个键直到条件成立再抬起：`sequence --lib hold-until --param key=<键> --param "until=<表达式>"` |
 
 新增 Lib 脚本：只组合现有接口、在多个任务里反复手写过的操作才沉淀；模块 docstring 写用法；只用 `ARGS` / `OPTS` 取参数，不要用 `argparse`（解析失败会 `sys.exit`）。
 

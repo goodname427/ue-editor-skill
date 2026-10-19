@@ -143,8 +143,10 @@ def _poll(bridge, expr, deadline):
 def _complete_input(bridge, result):
     if result['status'] != 'ok':
         return result
-    requests = re.findall(r'^\[input-request\] (\d+)$', result.get('output', ''), re.MULTILINE)
-    for request in requests:
+    requests = re.findall(r'^\[input-request\] (\d+)(?: (\d+(?:\.\d+)?))?$', result.get('output', ''), re.MULTILINE)
+    for request, extra in requests:
+        # 按住类输入在抬起后才出结果，回读上限要加上按住时长
+        limit = 5 + (float(extra) if extra else 0)
         begin = time.monotonic()
         while True:
             response = bridge.evaluate('unreal.AgentSlateDriverFunctionLib.get_input_result(%s)' % request)
@@ -162,8 +164,8 @@ def _complete_input(bridge, result):
                             'input': state, 'request_id': int(request), 'output': result.get('output', ''), 'command_sent': True}
                 result['output'] = result.get('output', '') + '[input checked] ' + json.dumps(state, ensure_ascii=False) + '\n'
                 break
-            if time.monotonic() - begin >= 5:
-                return {'status': 'error', 'error_type': 'InputWaitTimeout', 'message': '点击仍在排队；不要重发。',
+            if time.monotonic() - begin >= limit:
+                return {'status': 'error', 'error_type': 'InputWaitTimeout', 'message': '输入仍在排队或执行；不要重发。',
                         'request_id': int(request), 'command_sent': True, 'output': result.get('output', '')}
             time.sleep(0.1)
     return result
@@ -252,6 +254,19 @@ def _sequence_steps(args):
         seconds = step.get('wait', 60)
         if not isinstance(positional, list) or not isinstance(options, dict) or any(not isinstance(k, str) for k in options):
             raise ValueError('步骤 args 必须是列表，options 必须是字符串键对象。')
+
+        def fill(value, number=index + 1):
+            # 整个值写成 "{名字}" 时替换成 --param 的值；缺参数在启动前报错，不等跑到一半
+            match = re.fullmatch(r'\{(\w+)\}', value) if isinstance(value, str) else None
+            if not match:
+                return value
+            if match.group(1) not in params:
+                raise ValueError('步骤 %d 需要 --param %s=<值>。' % (number, match.group(1)))
+            return params[match.group(1)]
+
+        positional = [fill(v) for v in positional]
+        options = {k: fill(v) for k, v in options.items()}
+        step = dict(step, **{key: fill(step[key]) for key in ('wait_before', 'wait_until', 'state') if key in step})
         if isinstance(seconds, bool) or not isinstance(seconds, int) or not 0 <= seconds <= 3600:
             raise ValueError('步骤 wait 必须是 0~3600 的整数秒。')
         for key in ('name', 'wait_before', 'wait_until', 'state'):
@@ -327,6 +342,11 @@ def _run_sequence(bridge, steps):
                 if phase == 'wait_before' and 'NameError' in str(result.get('message', '')):
                     result['hint'] = ('wait_before 在动作脚本执行前求值，看不到本步脚本里定义的函数；'
                                       '条件要么改成直接查询表达式，要么放到上一步的 wait_until')
+                # 前面的步骤可能按住了键/鼠标（如 hold-until），中途失败时放开，不让它一直按着
+                if any('[input-request]' in c['output'] for c in completed) or '[input-request]' in output:
+                    released = bridge.evaluate('unreal.AgentSlateDriverFunctionLib.release_all_input() '
+                                               'if hasattr(unreal, "AgentSlateDriverFunctionLib") else ""')
+                    result['input_released'] = released['status'] == 'ok'
                 return dict(result, step=step['name'], step_index=index, phase=phase,
                             command_sent=phase != 'wait_before', output=output, completed=completed, timings=timings)
         completed.append({'step': step['name'], 'output': output, 'waited': result.get('waited', 0), 'timings': timings})

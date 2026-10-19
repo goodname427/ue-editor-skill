@@ -1,0 +1,17 @@
+{
+  "steps": [
+    {
+      "name": "press and hold until condition",
+      "lib": "ui",
+      "args": ["keydown", "{key}"],
+      "options": {"max_hold": "70"},
+      "wait_until": "{until}",
+      "wait": 60
+    },
+    {
+      "name": "release",
+      "lib": "ui",
+      "args": ["keyup", "{key}"]
+    }
+  ]
+}

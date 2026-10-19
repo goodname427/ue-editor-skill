@@ -136,4 +136,45 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
 	static FString InputText(const FString& Locator, const FString& WindowFilter, int32 MatchIndex, const FString& Text, bool bReplace = true, bool bCommit = true);
+
+	// ==================== 按住 / 抬起 / 移动 ====================
+	// 以下接口排在同一条输入时间线上：前一步完成（含跨帧的移动、按住等待）才执行下一步，某步失败时取消其后所有步骤。
+	// 按住的键/鼠标键记在本库内，超过 MaxHoldSeconds 自动抬起，防止 Agent 中途失败把键一直按着。结果都用 GetInputResult 回读。
+
+	/**
+	 * 按下键盘/手柄键并保持
+	 * @param HoldSeconds >0 时按住这么久后自动抬起（长按），结果在抬起后才完成；0 表示一直按住，直到 KeyUp / ReleaseAllInput
+	 * @param MaxHoldSeconds 按住上限，到时自动抬起；0 表示不设上限
+	 * @return JSON对象，包含 success, focus（排队时的焦点）, request_id
+	 */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
+	static FString KeyDown(const FString& KeyName, bool bCtrl = false, bool bShift = false, bool bAlt = false, float HoldSeconds = 0.f, float MaxHoldSeconds = 30.f);
+
+	/** 抬起经 KeyDown 按住的键；没按住时判失败 */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
+	static FString KeyUp(const FString& KeyName);
+
+	/**
+	 * 在控件中心（Locator 非空）或坐标处按下鼠标键并保持
+	 * 控件模式在执行时校验落点最上层控件是目标或其子节点，被遮挡时判失败、不发按下
+	 * @param HoldSeconds >0 时按住这么久后自动抬起（长按）；0 表示一直按住，直到 MouseUp / ReleaseAllInput
+	 * @return JSON对象，包含 success, pos, hit（排队前）, request_id；控件模式另含 match_count, target
+	 */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
+	static FString MouseDown(const FString& Locator, const FString& WindowFilter, int32 MatchIndex, float X, float Y, const FString& Button = TEXT("Left"), float HoldSeconds = 0.f, float MaxHoldSeconds = 30.f);
+
+	/** 在当前指针位置抬起经 MouseDown 按住的鼠标键；没按住时判失败 */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
+	static FString MouseUp(const FString& Button = TEXT("Left"));
+
+	/**
+	 * 把指针从当前位置移到坐标处，分 Frames 帧线性插值；有鼠标键按住时就是拖动
+	 * @return JSON对象，包含 success, request_id；回读含 pos, hit, dragging
+	 */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
+	static FString MouseMove(float X, float Y, int32 Frames = 1);
+
+	/** 下一帧取消时间线上所有未执行的步骤，并抬起本库按住的全部键与鼠标键；回读含 released */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
+	static FString ReleaseAllInput();
 };

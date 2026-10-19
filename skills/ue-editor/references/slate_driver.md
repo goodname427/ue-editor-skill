@@ -178,6 +178,31 @@ print(lib.input_text('name=EditableTextBox_Num', '', 0, '5', True, True))
 - **回读**: 用 `GetInputResult` 读结果，含 `expected` / `actual`。实际值不等于请求值即失败 —— 业务侧改值、被上限截断、格式化成 `1,000` 都会显形；提交后控件消失时 `actual = (target destroyed)` 视为通过
 - **注意**: 命中容器（如 UMG 的 `EditableTextBox` 外层）时会自动取其中第一个可编辑控件。不用 `SetText` 写值：那样不触发 OnTextChanged，业务侧收不到修改
 
+### 按住 / 抬起 / 移动
+
+`PressKey` / `ClickWidget` 是一次性的按下+抬起。长按、按住直到某个条件、拖动用下面这组原语拼装：
+
+| 接口 | 作用 |
+|---|---|
+| `key_down(key, ctrl, shift, alt, hold_seconds=0, max_hold_seconds=30)` | 按下键盘/手柄键。`hold_seconds>0` 时按住这么久后自动抬起（长按），结果在抬起后完成；为 0 时一直按住 |
+| `key_up(key)` | 抬起 `key_down` 按住的键；没按住时判失败 |
+| `mouse_down(locator, window, index, x, y, button='Left', hold_seconds=0, max_hold_seconds=30)` | `locator` 非空时按在控件中心，并在执行时校验落点最上层控件是目标或其子节点，被遮挡时判失败、不发按下；`locator` 为空时按在 `(x, y)` |
+| `mouse_up(button='Left')` | 在当前指针位置抬起 |
+| `mouse_move(x, y, frames=1)` | 指针从当前位置分 `frames` 帧线性移到 `(x, y)`；有键按住时就是拖动，回读里 `dragging=true` |
+| `release_all_input()` | 下一帧取消队列里所有未执行的步骤，抬起本库按住的全部键；回读 `released` 是被抬起的键名 |
+
+- **一条时间线**：除 `release_all_input` 外，这些调用排在同一条输入时间线上，前一步完成（包括多帧移动、按住等待）才执行下一步，相邻两步至少隔一帧。所以 `mouse_down → mouse_move → mouse_up` 可以连着调用，不用等。某一步失败时，排在它后面的步骤全部取消，回读消息为 `Cancelled because an earlier queued input failed`。
+- **防止一直按着**：按住的键记在本库内，`max_hold_seconds` 到了自动抬起（0 表示不设上限，不建议）。Agent 中途失败时，至多按住到这个上限；也可以随时调 `release_all_input`。
+- **回读**：都返回 `request_id`，结果用 `GetInputResult` 读。`key_down` 含 `handled`（是否有控件处理），定时长按含 `held_seconds`，`mouse_down`/`mouse_up`/`mouse_move` 含 `pos` 与 `hit`。
+- **合成事件只走 Slate**：游戏侧 `PlayerController.is_input_key_down` / `get_input_key_time_down` 能读到按住状态（PIE 实测）。不会产生系统级按键重复，按住字母键不会在输入框里连续出字。编辑器在后台时，关卡视口不是 realtime，飞行镜头这类依赖逐帧 tick 的效果未必看得到。
+
+```python
+lib.mouse_down('', '', 0, -2264, 800, 'Left', 0, 30)   # 按住
+lib.mouse_move(-2264, 500, 20)                          # 20 帧拖到目标
+lib.mouse_up('Left')                                    # 抬起
+lib.key_down('E', False, False, False, 1.5, 31.5)       # 长按 E 1.5 秒
+```
+
 ## 典型流程
 
 同一次调用中排队的输入在下一帧按顺序执行，可以写在一起：
