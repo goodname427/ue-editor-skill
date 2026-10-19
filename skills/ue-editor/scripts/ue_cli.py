@@ -30,6 +30,11 @@ from ue_bridge import UEBridge, DEFAULT_DISCOVER_TIMEOUT as DISCOVER_TIMEOUT
 import ue_log
 
 LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib')
+# 编辑器侧可 import 的模块（如 ue_input）；每次执行前加进 sys.path 并丢掉缓存，git pull 后无需重启编辑器
+EDITOR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'editor')
+PRELUDE = ('import sys\n'
+           'if %r not in sys.path: sys.path.insert(0, %r)\n'
+           "sys.modules.pop('ue_input', None)\n") % (EDITOR_DIR, EDITOR_DIR)
 
 # 控制台/管道统一按 UTF-8 输出，避免 gbk 下中文乱码或编码异常
 sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')
@@ -140,12 +145,36 @@ def _poll(bridge, expr, deadline):
         time.sleep(max(0, min(0.5, deadline - time.monotonic())))
 
 
+def _input_check(bridge, expr, result):
+    response = bridge.evaluate(expr)
+    if response['status'] != 'ok':
+        return dict(response, output=result.get('output', ''), command_sent=True)
+    try:
+        state = json.loads(ast.literal_eval(response['result']))
+        if not isinstance(state, dict) or not isinstance(state.get('ok'), bool):
+            raise ValueError('input check must return a JSON object with ok')
+    except (ValueError, SyntaxError) as e:
+        return {'status': 'error', 'error_type': 'InvalidResponse', 'message': str(e), 'command_sent': True}
+    if not state['ok']:
+        return {'status': 'error', 'error_type': 'InputAssertionFailed', 'message': state.get('message') or 'Input check failed',
+                'input': state, 'output': result.get('output', ''), 'command_sent': True}
+    result['output'] = result.get('output', '') + '[input checked] ' + json.dumps(state, ensure_ascii=False) + '\n'
+    return None
+
+
 def _complete_input(bridge, result):
+    """按脚本输出顺序等待 [input-request]，并在其前面的请求都完成后求值 [input-check]。"""
     if result['status'] != 'ok':
         return result
-    requests = re.findall(r'^\[input-request\] (\d+)(?: (\d+(?:\.\d+)?))?$', result.get('output', ''), re.MULTILINE)
-    for request, extra in requests:
-        # 按住类输入在抬起后才出结果，回读上限要加上按住时长
+    marks = re.findall(r'^\[input-(request|check)\] (.+)$', result.get('output', ''), re.MULTILINE)
+    for kind, value in marks:
+        if kind == 'check':
+            failure = _input_check(bridge, value, result)
+            if failure:
+                return failure
+            continue
+        request, _, extra = value.partition(' ')
+        # 时间线上的等待步骤在等满后才出结果，回读上限要加上等待时长
         limit = 5 + (float(extra) if extra else 0)
         begin = time.monotonic()
         while True:
@@ -289,9 +318,9 @@ def _sequence_steps(args):
         for key in ('wait_before', 'wait_until', 'state'):
             if key in step:
                 compile(step[key], '<sequence:%s>' % key, 'eval')
-        code = 'ARGS, OPTS, SEQUENCE_PARAMS = %r, %r, %r\nexec(compile(%r, %r, "exec"))\n' % (positional, options, params, text, filename)
+        code = PRELUDE + 'ARGS, OPTS, SEQUENCE_PARAMS = %r, %r, %r\nexec(compile(%r, %r, "exec"))\n' % (positional, options, params, text, filename)
         steps.append(dict(step, name=step.get('name', 'step-%d' % (index + 1)), code=code, wait=seconds,
-                          parameters='ARGS, OPTS, SEQUENCE_PARAMS = %r, %r, %r' % (positional, options, params)))
+                          parameters=PRELUDE + 'ARGS, OPTS, SEQUENCE_PARAMS = %r, %r, %r' % (positional, options, params)))
     return steps
 
 
@@ -378,7 +407,7 @@ def cmd_exec(args, tokens):
         sys.exit(1)
     positional, options = _split_script_args(tokens)
     # 先注入参数再以 compile 执行源码：报错行号与脚本一致，模块 docstring 仍会写入 __doc__ 供用法提示
-    code = 'ARGS, OPTS = %r, %r\nexec(compile(%r, %r, "exec"))\n' % (positional, options, src, name)
+    code = PRELUDE + 'ARGS, OPTS = %r, %r\nexec(compile(%r, %r, "exec"))\n' % (positional, options, src, name)
     result = _run(args, lambda b: _execute_and_wait(b, code, args))
     # 成功时直接输出脚本 print 的文本（省去 JSON 转义，多行可读）；失败时输出 JSON 并以退出码 1 结束
     if result['status'] != 'ok':

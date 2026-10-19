@@ -36,6 +36,7 @@ python scripts/ue_cli.py discover                              # 确认编辑器
 |----|------|--------|
 | CLI / Bridge | `scripts/ue_cli.py`、`ue_bridge.py`、`ue_log.py` | 入口与传输；本地截图、日志观察、跨帧等待、编码与超时 |
 | Lib | `scripts/lib/*.py`、`*.sequence.json` | 常用 Python 动作与跨帧步骤清单，只组合现有接口 |
+| 编辑器侧模块 | `scripts/editor/*.py`（如 `ue_input`） | 编辑器内可 `import` 的组合实现：点击、长按、拖动、文本输入等都由 C++ 原子步骤在这里拼装，Lib 与项目脚本共用，别处不重复实现 |
 | Reference | `references/*.md` | 接口与用法文档，按需读取 |
 | AgentTools | 工程插件 `Plugins/AgentTools`（安装器从本仓库链接进工程） | Python 访问不到的 C++ 能力（Slate 读取与输入、Widget 蓝图编辑），仅编辑器。改了函数体用 Live Coding；新增或改了 `UFUNCTION` 签名要重启编辑器 |
 

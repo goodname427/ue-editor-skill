@@ -15,7 +15,8 @@
  *   - key=value：精确匹配（不区分大小写），key 取 name / tag / text / hint / type / class；type 也匹配模板包装内的类型名
  *   - key~=value：包含匹配
  *   - 多个条件用 ; 连接，需全部满足，如 type=SButton;text~=保存
- * 输入类接口在下一帧执行（返回时尚未生效），避免模态对话框阻塞本次 Python 调用。
+ * 只提供原子能力：查询控件，以及排在一条时间线上的输入步骤（按下、抬起、移动、滚轮、聚焦、全选、字符、等待）。
+ * 点击、长按、拖动、文本输入等组合由 Skill 的 Python 模块 ue_input 拼装，不在这里重复实现。
  */
 UCLASS()
 class UAgentSlateDriverFunctionLib : public UBlueprintFunctionLibrary
@@ -61,7 +62,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
 	static FString FindWidgets(const FString& Locator, const FString& WindowFilter, bool bIncludeHidden = false);
 
-	// ==================== 键盘焦点 ====================
+	/** 坐标处最上层控件（JSON 节点），没有窗口时为 null */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
+	static FString WidgetAt(float X, float Y);
 
 	/**
 	 * 获取当前键盘焦点控件
@@ -70,111 +73,61 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
 	static FString GetKeyboardFocus();
 
-	/**
-	 * 把键盘焦点直接设到命中 Locator 的控件（下一帧执行，与后续输入按顺序排队）
-	 * 不经过点击路由，编辑器窗口不在前台时也可靠；目标须支持键盘焦点（如 SEditableText）
-	 * @return JSON对象，包含 success, match_count, target
-	 */
-	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
-	static FString FocusWidget(const FString& Locator, const FString& WindowFilter, int32 MatchIndex = 0);
-
-	// ==================== 鼠标输入 ====================
-
-	/**
-	 * 在桌面坐标处点击
-	 * @param Button Left / Right / Middle
-	 * @param bDoubleClick 是否双击
-	 * @return JSON对象，包含 success, pos, hit（坐标下最上层控件）
-	 */
-	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
-	static FString ClickAt(float X, float Y, const FString& Button = TEXT("Left"), bool bDoubleClick = false, const FString& ExpectHit = TEXT(""));
-
-	/**
-	 * 点击命中 Locator 的控件中心
-	 * @param MatchIndex 多个命中时取第几个（从 0 开始）
-	 * @param ExpectHit 非空时须唯一匹配可见控件；实际发送前校验命中/捕获路径包含该控件
-	 * @param bCheckTarget 未给 ExpectHit 时，校验光标下的最上层控件是目标或其子节点；被遮挡或 HitTestInvisible 时直接判失败，不发按下
-	 * @return JSON对象，包含 success, match_count, target, pos, hit；校验模式另含 request_id
-	 */
-	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
-	static FString ClickWidget(const FString& Locator, const FString& WindowFilter, int32 MatchIndex = 0, const FString& Button = TEXT("Left"), bool bDoubleClick = false, const FString& ExpectHit = TEXT(""), bool bCheckTarget = false);
-
-	/** 最近 64 次输入校验结果；pending=true 未执行，false 时包含 success 与 clicks_sent（或文本回读） */
+	/** 输入步骤的结果（保留最近 64 个）；pending=true 表示还没执行完 */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
 	static FString GetInputResult(int32 RequestId);
 
-	/**
-	 * 在桌面坐标处滚动滚轮
-	 * @param Delta 滚动量，正数向上
-	 * @param Frames 滚动后等几帧再回读（默认 8，覆盖平滑滚动）
-	 * @return JSON对象，包含 success, pos, hit, handled, moved；moved=false 表示光标下控件没有移动
-	 */
+	// ==================== 输入步骤 ====================
+	// 每个调用排一步到同一条时间线：前一步完成才执行下一步，相邻两步至少隔一帧，某步失败时取消其后所有步骤。
+	// 返回 JSON 含 success（只表示已排队）与 request_id；执行结果用 GetInputResult 读。
+	// 按住的键/鼠标键记在本库内，到 MaxHoldSeconds 自动抬起（0 为不限），防止调用方中途失败把键一直按着。
+
+	/** 把键盘焦点设到命中的控件；它本身不接受焦点时取其中第一个可编辑控件。不经过点击路由 */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
-	static FString ScrollAt(float X, float Y, float Delta, int32 Frames = 8);
+	static FString FocusWidget(const FString& Locator, const FString& WindowFilter, int32 MatchIndex = 0);
 
-	// ==================== 键盘输入 ====================
-
-	/**
-	 * 向当前键盘焦点发送一次按键（下一帧按下，再过两帧抬起）
-	 * @param KeyName FKey 名称，如 Enter / Escape / Tab / Delete / F5 / S / Up
-	 */
+	/** 全选当前键盘焦点所在输入框的文字；焦点不是输入框时判失败 */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
-	static FString PressKey(const FString& KeyName, bool bCtrl = false, bool bShift = false, bool bAlt = false);
+	static FString SelectAllText();
 
-	/**
-	 * 向当前键盘焦点逐字输入文本（字符事件，可含中文）
-	 */
+	/** 向当前键盘焦点逐字发送字符事件（可含中文）；只追加，不清空旧内容 */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
 	static FString TypeText(const FString& Text);
 
-	/**
-	 * 原子文本输入：聚焦命中的输入框（本身不是输入框时取其中第一个可编辑控件）→ 全选 → 输入 →
-	 * 可选提交 → 等两帧回读，防止数字类输入框把新值追加到旧值后面并被业务上限截断。
-	 * @param bReplace 是否先全选替换旧内容（默认替换）；false 时追加
-	 * @param bCommit 是否按 Enter 提交（默认提交，触发 OnTextCommitted）
-	 * @return JSON对象，包含 success, match_count, target, editable, request_id；结果用 GetInputResult 回读
-	 */
+	/** 按下键盘/手柄键并保持，直到 KeyUp / ReleaseAllInput；普通退格额外发字符码 8。结果含 handled */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
-	static FString InputText(const FString& Locator, const FString& WindowFilter, int32 MatchIndex, const FString& Text, bool bReplace = true, bool bCommit = true);
-
-	// ==================== 按住 / 抬起 / 移动 ====================
-	// 以下接口排在同一条输入时间线上：前一步完成（含跨帧的移动、按住等待）才执行下一步，某步失败时取消其后所有步骤。
-	// 按住的键/鼠标键记在本库内，超过 MaxHoldSeconds 自动抬起，防止 Agent 中途失败把键一直按着。结果都用 GetInputResult 回读。
-
-	/**
-	 * 按下键盘/手柄键并保持
-	 * @param HoldSeconds >0 时按住这么久后自动抬起（长按），结果在抬起后才完成；0 表示一直按住，直到 KeyUp / ReleaseAllInput
-	 * @param MaxHoldSeconds 按住上限，到时自动抬起；0 表示不设上限
-	 * @return JSON对象，包含 success, focus（排队时的焦点）, request_id
-	 */
-	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
-	static FString KeyDown(const FString& KeyName, bool bCtrl = false, bool bShift = false, bool bAlt = false, float HoldSeconds = 0.f, float MaxHoldSeconds = 30.f);
+	static FString KeyDown(const FString& KeyName, bool bCtrl = false, bool bShift = false, bool bAlt = false, float MaxHoldSeconds = 30.f);
 
 	/** 抬起经 KeyDown 按住的键；没按住时判失败 */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
 	static FString KeyUp(const FString& KeyName);
 
 	/**
-	 * 在控件中心（Locator 非空）或坐标处按下鼠标键并保持
-	 * 控件模式在执行时校验落点最上层控件是目标或其子节点，被遮挡时判失败、不发按下
-	 * @param HoldSeconds >0 时按住这么久后自动抬起（长按）；0 表示一直按住，直到 MouseUp / ReleaseAllInput
-	 * @return JSON对象，包含 success, pos, hit（排队前）, request_id；控件模式另含 match_count, target
+	 * 先把指针移到坐标处，再按下鼠标键并保持，直到 MouseUp / ReleaseAllInput
+	 * @param bDoubleClick 以双击事件代替按下（双击 = 按下、抬起、双击按下、抬起）
+	 * @param CheckLocator 非空时执行前校验：落点最上层控件须是该控件或其子节点、且控件可用，否则判失败、不发按下
+	 * @return 排队时另含 pos, hit；校验模式另含 match_count, target。结果含执行时的 hit
 	 */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
-	static FString MouseDown(const FString& Locator, const FString& WindowFilter, int32 MatchIndex, float X, float Y, const FString& Button = TEXT("Left"), float HoldSeconds = 0.f, float MaxHoldSeconds = 30.f);
+	static FString MouseDown(float X, float Y, const FString& Button = TEXT("Left"), bool bDoubleClick = false, const FString& CheckLocator = TEXT(""), const FString& WindowFilter = TEXT(""), int32 MatchIndex = 0, float MaxHoldSeconds = 30.f);
 
-	/** 在当前指针位置抬起经 MouseDown 按住的鼠标键；没按住时判失败 */
+	/** 在当前指针位置抬起经 MouseDown 按住的鼠标键；没按住时判失败。结果含 pos, hit */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
 	static FString MouseUp(const FString& Button = TEXT("Left"));
 
-	/**
-	 * 把指针从当前位置移到坐标处，分 Frames 帧线性插值；有鼠标键按住时就是拖动
-	 * @return JSON对象，包含 success, request_id；回读含 pos, hit, dragging
-	 */
+	/** 指针从当前位置分 Frames 帧线性移到坐标处；有键按住时就是拖动。结果含 pos, hit, dragging */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
 	static FString MouseMove(float X, float Y, int32 Frames = 1);
 
-	/** 下一帧取消时间线上所有未执行的步骤，并抬起本库按住的全部键与鼠标键；回读含 released */
+	/** 在坐标处滚一次滚轮（正数向上）。结果含 handled：事件路径上有没有控件处理，不代表内容真的动了 */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
+	static FString MouseWheel(float X, float Y, float Delta);
+
+	/** 时间线上等待：至少 Seconds 秒且至少 Frames 帧 */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
+	static FString WaitInput(float Seconds = 0.f, int32 Frames = 0);
+
+	/** 不排队，下一帧就取消时间线上所有未完成的步骤，并抬起本库按住的全部键；结果含 released */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
 	static FString ReleaseAllInput();
 };

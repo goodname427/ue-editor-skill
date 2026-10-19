@@ -1,0 +1,209 @@
+"""
+编辑器内的输入组合：点击、长按、按键、拖动、滚动、文本输入，都由 AgentSlateDriverFunctionLib 的原子步骤拼出来。
+Skill 的 ui Lib 和项目脚本都 import 这里，不要在别处再拼一遍（ue_cli 每次执行前把本目录加进 sys.path）。
+
+  import ue_input
+  ue_input.click('name=Btn_OK')                     控件中心点击，默认校验落点没被遮挡
+  ue_input.click(at=(x, y))                         坐标点击，不校验；要校验加 expect_hit=<Locator>
+  ue_input.click('name=Btn', hold=1.5)              长按 1.5 秒
+  ue_input.key('Escape') / key('S', ctrl=True) / key('E', hold=1.5)
+  ue_input.input_text('name=EditableTextBox_Num', '5', commit=True)
+  ue_input.scroll(x, y, -3)
+  ue_input.drag((x0, y0), (x1, y1), frames=20)
+
+原子步骤排在 C++ 的同一条时间线上：前一步完成才执行下一步，失败时取消其后所有步骤。
+每步打印 `[input-request] <id> [秒]`，需要回读的组合再打印 `[input-check] <表达式>`；
+ue_cli 执行完脚本后按顺序等这些结果，失败时报 InputAssertionFailed。调用方不要自己 sleep 或轮询。
+"""
+import json
+import unreal
+
+LIB = getattr(unreal, 'AgentSlateDriverFunctionLib', None)
+if LIB is None:
+    raise RuntimeError('AgentSlateDriverFunctionLib not found: compile and enable plugin AgentTools, then restart the editor')
+
+MAX_HOLD = 30.0
+EDITABLE_TYPES = ('SEditableText', 'SEditableTextBox', 'SMultiLineEditableText', 'SMultiLineEditableTextBox')
+
+
+def parse(raw):
+    data = json.loads(raw)
+    if isinstance(data, dict) and (data.get('error') or data.get('success') is False):
+        raise RuntimeError(data.get('error') or data.get('message'))
+    return data
+
+
+def _queued(raw, seconds=0.0):
+    r = parse(raw)
+    print('[input-request] %d%s' % (r['request_id'], ' %g' % seconds if seconds else ''))
+    return r
+
+
+def check(expr):
+    """前面的步骤都完成后，ue_cli 求值 expr；它须返回 JSON 字符串，ok=false 时判失败。"""
+    print('[input-check] ' + expr)
+
+
+# ---------- 查询 ----------
+
+def find(locator, window=''):
+    return parse(LIB.find_widgets(locator, window))
+
+
+def match(locator, window='', index=0):
+    matches = find(locator, window)
+    if not 0 <= index < len(matches):
+        raise RuntimeError('no widget at index %d (%d matched): %s' % (index, len(matches), locator))
+    return matches[index]
+
+
+def center(node):
+    x, y, w, h = node['rect']
+    return x + w / 2.0, y + h / 2.0
+
+
+def widget_at(x, y):
+    return json.loads(LIB.widget_at(x, y))
+
+
+def read_text(locator, window='', index=0):
+    """命中控件的文字；它不是输入框时取其中第一个输入框（与 FocusWidget 的取法一致）。控件不在时返回 None。"""
+    matches = find(locator, window)
+    if not 0 <= index < len(matches):
+        return None
+    node = matches[index]
+    if node['type'] in EDITABLE_TYPES:
+        return node.get('text', '')
+    tree = parse(LIB.dump_slate_tree(window, locator, 5, False, False, 200, index))
+    for win in tree['windows']:
+        for n in win['nodes']:
+            if n['type'] in EDITABLE_TYPES:
+                return n.get('text', '')
+    return node.get('text', '')
+
+
+# ---------- 原子步骤 ----------
+
+def key_down(name, ctrl=False, shift=False, alt=False, max_hold=MAX_HOLD):
+    return _queued(LIB.key_down(name, ctrl, shift, alt, max_hold))
+
+
+def key_up(name):
+    return _queued(LIB.key_up(name))
+
+
+def mouse_down(x, y, button='Left', double=False, check_locator='', window='', index=0, max_hold=MAX_HOLD):
+    return _queued(LIB.mouse_down(x, y, button, double, check_locator, window, index, max_hold))
+
+
+def mouse_up(button='Left'):
+    return _queued(LIB.mouse_up(button))
+
+
+def move(x, y, frames=1):
+    return _queued(LIB.mouse_move(x, y, frames))
+
+
+def wheel(x, y, delta):
+    return _queued(LIB.mouse_wheel(x, y, delta))
+
+
+def focus(locator, window='', index=0):
+    return _queued(LIB.focus_widget(locator, window, index))
+
+
+def select_all():
+    return _queued(LIB.select_all_text())
+
+
+def type_chars(text):
+    return _queued(LIB.type_text(text))
+
+
+def wait(seconds=0.0, frames=0):
+    return _queued(LIB.wait_input(seconds, frames), seconds)
+
+
+def release_all():
+    return _queued(LIB.release_all_input())
+
+
+# ---------- 组合 ----------
+
+def _press_point(locator, at, window, index, check, expect_hit):
+    """落点与校验对象：给 at 时用坐标、只按 expect_hit 校验；否则用控件中心、默认校验该控件。"""
+    if at is not None:
+        return at[0], at[1], None, (expect_hit or ''), 0
+    target = match(locator, window, index)
+    x, y = center(target)
+    if expect_hit:
+        return x, y, target, expect_hit, 0
+    return x, y, target, (locator if check else ''), index
+
+
+def click(locator=None, at=None, window='', index=0, button='Left', double=False, hold=0.0, check=True, expect_hit=None):
+    """单击 / 双击 / 长按。返回 {'target', 'pos', 'hit'}（hit 为排队时落点最上层控件）。"""
+    x, y, target, check_locator, check_index = _press_point(locator, at, window, index, check, expect_hit)
+    down = mouse_down(x, y, button, False, check_locator, window, check_index, MAX_HOLD + hold)
+    if hold:
+        wait(hold)
+    mouse_up(button)
+    if double:
+        mouse_down(x, y, button, True, check_locator, window, check_index)
+        mouse_up(button)
+    return {'target': target, 'pos': (x, y), 'hit': down.get('hit')}
+
+
+def key(name, ctrl=False, shift=False, alt=False, hold=0.0):
+    """按一下键（按下后至少隔两帧抬起），hold 秒时为长按。返回按下时的排队结果（含排队时的 focus）。"""
+    down = key_down(name, ctrl, shift, alt, MAX_HOLD + hold)
+    wait(hold, 1)
+    key_up(name)
+    return down
+
+
+def drag(start, end, frames=20, button='Left', check_locator='', window='', index=0):
+    down = mouse_down(start[0], start[1], button, False, check_locator, window, index)
+    move(end[0], end[1], frames)
+    mouse_up(button)
+    return down
+
+
+def scroll(x, y, delta, frames=8):
+    """滚一次滚轮，等 frames 帧后回读落点最上层控件有没有变（moved）。返回 (排队结果, 滚动前落点控件)。"""
+    before = widget_at(x, y)
+    r = wheel(x, y, delta)
+    wait(0, frames)
+    check('__import__("ue_input").check_moved(%r, %r, %r)' % (x, y, json.dumps(before)))
+    return r, before
+
+
+def check_moved(x, y, before_json):
+    before, after = json.loads(before_json), widget_at(x, y)
+    moved = before is None or after is None or any(before.get(k) != after.get(k) for k in ('type', 'name', 'rect'))
+    return json.dumps({'ok': True, 'moved': moved, 'hit': after}, ensure_ascii=False)
+
+
+def input_text(locator, text, window='', index=0, replace=True, commit=False):
+    """聚焦 → 全选（replace）→ 输入 → 回车（commit）→ 等两帧回读；回读值不等于预期时判失败。
+    只在提交时同步业务的框要 commit=True；被业务截断（上下限、格式化）时失败里的 actual 就是截断后的值。"""
+    expected = text if replace else (read_text(locator, window, index) or '') + text
+    r = focus(locator, window, index)
+    if replace:
+        select_all()
+    type_chars(text)
+    if commit:
+        key('Enter')
+    wait(0, 2)
+    check('__import__("ue_input").check_text(%r, %r, %d, %r)' % (locator, window, index, expected))
+    return r
+
+
+def check_text(locator, window, index, expected):
+    actual = read_text(locator, window, index)
+    if actual is None:
+        # 提交后控件消失（如搜索框所在弹窗关闭），无法回读，不当作失败
+        return json.dumps({'ok': True, 'expected': expected, 'actual': '(target destroyed)'}, ensure_ascii=False)
+    ok = actual == expected
+    return json.dumps({'ok': ok, 'expected': expected, 'actual': actual,
+                       'message': '' if ok else 'Text readback does not match the requested value'}, ensure_ascii=False)

@@ -8,6 +8,7 @@
 #include "Engine/World.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Application/SlateUser.h"
+#include "HAL/IConsoleManager.h"
 #include "InputCoreTypes.h"
 #include "Layout/ArrangedChildren.h"
 #include "Layout/WidgetPath.h"
@@ -21,6 +22,7 @@
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
+#include "Widgets/Text/SMultiLineEditableText.h"
 #include "Widgets/Text/SRichTextBlock.h"
 #include "Widgets/Text/STextBlock.h"
 
@@ -615,27 +617,6 @@ static void SDQueueInput(TFunction<void()> Action)
 	}));
 }
 
-// 帧数延后执行：提交后回读、滚动后回读都用它；比较帧号避免新增 ticker 同帧执行
-static void SDQueueDelayed(int32 Frames, TFunction<void()> Action)
-{
-	SDQueueInput([Frames, Action = MoveTemp(Action)]()
-	{
-		const uint64 RunFrame = GFrameCounter + Frames;
-		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Action, RunFrame](float)
-		{
-			if (GFrameCounter < RunFrame)
-			{
-				return true;
-			}
-			if (FSlateApplication::IsInitialized())
-			{
-				Action();
-			}
-			return false;
-		}));
-	});
-}
-
 static FKey SDParseMouseButton(const FString& Button)
 {
 	if (Button.IsEmpty() || Button.Equals(TEXT("Left"), ESearchCase::IgnoreCase))
@@ -663,18 +644,6 @@ static FString SDDescribeHit(const FVector2D& Pos)
 	}
 	const FArrangedWidget& HitWidget = Path.Widgets.Last();
 	return SDDescribeWidget(HitWidget.Widget, HitWidget.Geometry);
-}
-
-// 光标下最上层控件；用于滚动后回读内容是否真的移动
-static TSharedPtr<SWidget> SDHitWidget(const FVector2D& Pos)
-{
-	FSlateApplication& SlateApp = FSlateApplication::Get();
-	const FWidgetPath Path = SlateApp.LocateWindowUnderMouse(Pos, SlateApp.GetInteractiveTopLevelWindows(), false, static_cast<uint32>(SlateApp.GetUserIndexForMouse()));
-	if (!Path.IsValid())
-	{
-		return nullptr;
-	}
-	return Path.Widgets.Last().Widget;
 }
 
 static FPointerEvent SDMakePointerEvent(const FVector2D& Pos, const FVector2D& LastPos, const TSet<FKey>& PressedButtons, const FKey& EffectingButton, float WheelDelta)
@@ -715,147 +684,6 @@ static bool SDIsAncestorOf(const TSharedPtr<SWidget>& Ancestor, const TSharedPtr
 		}
 	}
 	return false;
-}
-
-static FString SDSendClick(const FVector2D Pos, const FKey Button, const bool bDoubleClick, const TSharedPtr<SWidget>& Expected = nullptr, bool bCheckHit = false,
-	const TSharedPtr<SWidget>& Target = nullptr, bool bCheckTarget = false)
-{
-	FSlateApplication& SlateApp = FSlateApplication::Get();
-	const TSet<FKey> NoButtons;
-	TSet<FKey> PressedButtons;
-	PressedButtons.Add(Button);
-	const FPointerEvent DownEvent = SDMakePointerEvent(Pos, Pos, PressedButtons, Button, 0.0f);
-	const FPointerEvent UpEvent = SDMakePointerEvent(Pos, Pos, NoButtons, Button, 0.0f);
-	FWidgetPath Path;
-	TArray<FString> Fields;
-	int32 ClicksSent = 0;
-
-	auto CheckPath = [&]()
-	{
-		Path = SlateApp.LocateWindowUnderMouse(Pos, SlateApp.GetInteractiveTopLevelWindows(), false, DownEvent.GetUserIndex());
-		const TSharedPtr<FSlateUser> User = SlateApp.GetUser(DownEvent.GetUserIndex());
-		if (User.IsValid() && User->HasCapture(DownEvent.GetPointerIndex()))
-		{
-			Path = User->GetCaptorPath(DownEvent.GetPointerIndex(), FWeakWidgetPath::EInterruptedPathHandling::ReturnInvalid, &DownEvent);
-		}
-		if (!Path.IsValid())
-		{
-			return false;
-		}
-		if (!bCheckHit && !bCheckTarget)
-		{
-			return true;
-		}
-		if (!Path.Widgets.Num())
-		{
-			return false;
-		}
-		if (bCheckHit)
-		{
-			if (!Expected.IsValid() || !Expected->IsEnabled())
-			{
-				return false;
-			}
-			// 比较真实控件身份，允许命中预期控件的子节点；不比较名称或矩形
-			for (int32 Index = 0; Index < Path.Widgets.Num(); ++Index)
-			{
-				const FArrangedWidget& Widget = Path.Widgets[Index];
-				if (&Widget.Widget.Get() == Expected.Get() && Widget.Widget->GetVisibility().IsVisible())
-				{
-					return true;
-				}
-			}
-			return false;
-		}
-		// 最上层控件是目标本身或其子节点才算点中；被遮挡时最上层是别的控件
-		const TSharedPtr<SWidget> Top = Path.Widgets.Last().Widget;
-		return Target.IsValid() && Target->GetVisibility().IsVisible() && (Top == Target || SDIsAncestorOf(Target, Top));
-	};
-	auto Finish = [&](bool bSuccess)
-	{
-		Fields.Add(AgentJson::PairBool(TEXT("pending"), false));
-		Fields.Add(AgentJson::PairInt(TEXT("clicks_sent"), ClicksSent));
-		Fields.Add(AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)));
-		if (Path.IsValid())
-		{
-			const FArrangedWidget& Hit = Path.Widgets.Last();
-			Fields.Add(AgentJson::PairRaw(TEXT("hit"), SDDescribeWidget(Hit.Widget, Hit.Geometry)));
-		}
-		const FString Message = bSuccess ? FString()
-			: (bCheckTarget && !bCheckHit)
-				? TEXT("Target check failed: the topmost widget at the click point is neither the target nor its child; it is probably covered or hit-test invisible, so no mouse down was sent")
-				: TEXT("Hit assertion failed or target unavailable; no further mouse down sent");
-		return SDResult(bSuccess, Message, Fields);
-	};
-	if (!CheckPath())
-	{
-		return Finish(false);
-	}
-	// 移动可能改变悬停或捕获，再查一次路径才发送按下
-	SlateApp.ProcessMouseMoveEvent(SDMakePointerEvent(Pos, SlateApp.GetCursorPos(), NoButtons, EKeys::Invalid, 0.0f));
-	if (!CheckPath())
-	{
-		return Finish(false);
-	}
-	SlateApp.ProcessMouseButtonDownEvent(Path.GetWindow()->GetNativeWindow(), DownEvent);
-	++ClicksSent;
-	// 已发按下必须配对抬起，不因回调销毁控件而遗留按住状态
-	SlateApp.ProcessMouseButtonUpEvent(UpEvent);
-	if (bDoubleClick)
-	{
-		if (!CheckPath())
-		{
-			return Finish(false);
-		}
-		SlateApp.ProcessMouseButtonDoubleClickEvent(Path.GetWindow()->GetNativeWindow(), DownEvent);
-		++ClicksSent;
-		SlateApp.ProcessMouseButtonUpEvent(UpEvent);
-	}
-	return Finish(true);
-}
-
-static FString SDQueueClick(const FVector2D& Pos, const FString& Button, bool bDoubleClick, TArray<FString> ExtraFields, const FString& ExpectHit = FString(), const FString& WindowFilter = FString(), const TSharedPtr<SWidget>& Target = nullptr, bool bCheckTarget = false)
-{
-	const FKey ButtonKey = SDParseMouseButton(Button);
-	if (!ButtonKey.IsValid())
-	{
-		return SDResult(false, FString::Printf(TEXT("Unknown mouse button: %s"), *Button));
-	}
-	TWeakPtr<SWidget> Expected;
-	TWeakPtr<SWidget> Checked = bCheckTarget ? Target : nullptr;
-	int32 RequestId = 0;
-	if (!ExpectHit.IsEmpty())
-	{
-		const FSDLocator Locator = SDParseLocator(ExpectHit);
-		TArray<FSDMatch> Matches;
-		if (!Locator.IsEmpty())
-		{
-			SDFindMatches(Locator, WindowFilter, Matches);
-		}
-		if (Matches.Num() != 1)
-		{
-			return SDResult(false, TEXT("ExpectHit must identify exactly one visible widget"));
-		}
-		Expected = Matches[0].Widget;
-		Checked = Expected;
-	}
-	if (Expected.IsValid() || Checked.IsValid())
-	{
-		RequestId = SDRegisterInput();
-		ExtraFields.Add(AgentJson::PairInt(TEXT("request_id"), RequestId));
-	}
-	ExtraFields.Add(AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)));
-	ExtraFields.Add(AgentJson::PairRaw(TEXT("hit"), SDDescribeHit(Pos)));
-	SDQueueInput([Pos, ButtonKey, bDoubleClick, Expected, Checked, RequestId]()
-	{
-		const FString Result = SDSendClick(Pos, ButtonKey, bDoubleClick, Expected.Pin(), RequestId != 0 && Expected.IsValid(),
-			Checked.Pin(), RequestId != 0 && !Expected.IsValid());
-		if (RequestId != 0 && SDInputResults.Contains(RequestId))
-		{
-			SDInputResults[RequestId] = Result;
-		}
-	});
-	return SDResult(true, FString(), ExtraFields);
 }
 
 static FString SDDescribeFocus()
@@ -1013,382 +841,9 @@ FString UAgentSlateDriverFunctionLib::GetKeyboardFocus()
 	return SDDescribeFocus();
 }
 
-FString UAgentSlateDriverFunctionLib::FocusWidget(const FString& Locator, const FString& WindowFilter, int32 MatchIndex)
-{
-	if (!FSlateApplication::IsInitialized())
-	{
-		return SDResult(false, TEXT("Slate is not initialized"));
-	}
-	const FSDLocator ParsedLocator = SDParseLocator(Locator);
-	if (ParsedLocator.IsEmpty())
-	{
-		return SDResult(false, TEXT("Locator is empty"));
-	}
-	TArray<FSDMatch> Matches;
-	SDFindMatches(ParsedLocator, WindowFilter, Matches);
-	TArray<FString> ExtraFields;
-	ExtraFields.Add(AgentJson::PairInt(TEXT("match_count"), Matches.Num()));
-	if (!Matches.IsValidIndex(MatchIndex))
-	{
-		return SDResult(false, FString::Printf(TEXT("No widget at match index %d"), MatchIndex), ExtraFields);
-	}
-	const FSDMatch& Match = Matches[MatchIndex];
-	if (!Match.Widget->SupportsKeyboardFocus())
-	{
-		return SDResult(false, TEXT("Widget does not support keyboard focus; target the inner editable widget"), ExtraFields);
-	}
-	ExtraFields.Add(AgentJson::PairRaw(TEXT("target"), SDMatchJson(Match)));
-	// 与输入一同排队到下一帧，保证"先聚焦、再输入"的顺序；直接设焦点，不依赖点击路由（编辑器不在前台时点击可能拿不到焦点）
-	const TWeakPtr<SWidget> WeakWidget = Match.Widget;
-	SDQueueInput([WeakWidget]()
-	{
-		if (const TSharedPtr<SWidget> Widget = WeakWidget.Pin())
-		{
-			FSlateApplication::Get().SetKeyboardFocus(Widget, EFocusCause::SetDirectly);
-		}
-	});
-	return SDResult(true, FString(), ExtraFields);
-}
-
-// ==================== 鼠标输入 ====================
-
-FString UAgentSlateDriverFunctionLib::ClickAt(float X, float Y, const FString& Button, bool bDoubleClick, const FString& ExpectHit)
-{
-	if (!FSlateApplication::IsInitialized())
-	{
-		return SDResult(false, TEXT("Slate is not initialized"));
-	}
-	return SDQueueClick(FVector2D(X, Y), Button, bDoubleClick, TArray<FString>(), ExpectHit);
-}
-
-FString UAgentSlateDriverFunctionLib::ClickWidget(const FString& Locator, const FString& WindowFilter, int32 MatchIndex, const FString& Button, bool bDoubleClick, const FString& ExpectHit, bool bCheckTarget)
-{
-	if (!FSlateApplication::IsInitialized())
-	{
-		return SDResult(false, TEXT("Slate is not initialized"));
-	}
-	const FSDLocator ParsedLocator = SDParseLocator(Locator);
-	if (ParsedLocator.IsEmpty())
-	{
-		return SDResult(false, TEXT("Locator is empty"));
-	}
-	TArray<FSDMatch> Matches;
-	SDFindMatches(ParsedLocator, WindowFilter, Matches);
-	TArray<FString> ExtraFields;
-	ExtraFields.Add(AgentJson::PairInt(TEXT("match_count"), Matches.Num()));
-	if (!Matches.IsValidIndex(MatchIndex))
-	{
-		return SDResult(false, FString::Printf(TEXT("No widget at match index %d"), MatchIndex), ExtraFields);
-	}
-	const FSDMatch& Match = Matches[MatchIndex];
-	ExtraFields.Add(AgentJson::PairRaw(TEXT("target"), SDMatchJson(Match)));
-	return SDQueueClick(Match.Info.Pos + Match.Info.Size * 0.5, Button, bDoubleClick, ExtraFields, ExpectHit, WindowFilter, Match.Widget, bCheckTarget);
-}
-
-FString UAgentSlateDriverFunctionLib::GetInputResult(int32 RequestId)
-{
-	if (const FString* Result = SDInputResults.Find(RequestId))
-	{
-		return *Result;
-	}
-	return SDResult(false, TEXT("Unknown or expired input request"), {AgentJson::PairBool(TEXT("pending"), false)});
-}
-
-FString UAgentSlateDriverFunctionLib::ScrollAt(float X, float Y, float Delta, int32 Frames)
-{
-	if (!FSlateApplication::IsInitialized())
-	{
-		return SDResult(false, TEXT("Slate is not initialized"));
-	}
-	const FVector2D Pos(X, Y);
-	TArray<FString> ExtraFields;
-	ExtraFields.Add(AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)));
-	ExtraFields.Add(AgentJson::PairRaw(TEXT("hit"), SDDescribeHit(Pos)));
-	// 回读判据：光标下最上层控件的几何在滚动后是否变化。列表/表格/自定义瀑布流都适用，不依赖具体滚动容器类型
-	const TSharedPtr<SWidget> BeforeHit = SDHitWidget(Pos);
-	const FGeometry BeforeGeometry = BeforeHit.IsValid() ? BeforeHit->GetTickSpaceGeometry() : FGeometry();
-	const int32 RequestId = SDRegisterInput();
-	ExtraFields.Add(AgentJson::PairInt(TEXT("request_id"), RequestId));
-	SDQueueInput([Pos, Delta, Frames, BeforeHit, BeforeGeometry, RequestId]()
-	{
-		FSlateApplication& SlateApp = FSlateApplication::Get();
-		const TSet<FKey> NoButtons;
-		SlateApp.ProcessMouseMoveEvent(SDMakePointerEvent(Pos, SlateApp.GetCursorPos(), NoButtons, EKeys::Invalid, 0.0f));
-		const bool bHandled = SlateApp.ProcessMouseWheelOrGestureEvent(SDMakePointerEvent(Pos, Pos, NoButtons, EKeys::Invalid, Delta), nullptr);
-		SDQueueDelayed(FMath::Max(1, Frames), [Pos, BeforeHit, BeforeGeometry, bHandled, RequestId]()
-		{
-			const TSharedPtr<SWidget> AfterHit = SDHitWidget(Pos);
-			bool bMoved = false;
-			if (AfterHit.IsValid() && AfterHit.Get() == BeforeHit.Get())
-			{
-				const FGeometry& After = AfterHit->GetTickSpaceGeometry();
-				bMoved = !After.GetAbsolutePosition().Equals(BeforeGeometry.GetAbsolutePosition(), 0.5f)
-					|| !After.GetAbsoluteSize().Equals(BeforeGeometry.GetAbsoluteSize(), 0.5f);
-			}
-			else
-			{
-				// 控件被替换或销毁，说明光标下的内容重排过
-				bMoved = true;
-			}
-			TArray<FString> Fields;
-			Fields.Add(AgentJson::PairBool(TEXT("pending"), false));
-			Fields.Add(AgentJson::PairBool(TEXT("handled"), bHandled));
-			Fields.Add(AgentJson::PairBool(TEXT("moved"), bMoved));
-			Fields.Add(AgentJson::PairRaw(TEXT("hit"), AfterHit.IsValid() ? SDDescribeWidget(AfterHit, AfterHit->GetTickSpaceGeometry()) : FString(TEXT("null"))));
-			if (!bHandled)
-			{
-				Fields.Add(AgentJson::Pair(TEXT("message"), TEXT("No widget consumed the wheel event at this point; nothing scrolled")));
-			}
-			if (SDInputResults.Contains(RequestId))
-			{
-				SDInputResults[RequestId] = SDResult(true, FString(), Fields);
-			}
-		});
-	});
-	return SDResult(true, FString(), ExtraFields);
-}
-
-// ==================== 键盘输入 ====================
-
-static bool SDIsEditableText(const TSharedRef<SWidget>& Widget)
-{
-	static const FName Type_SEditableText(TEXT("SEditableText"));
-	static const FName Type_SEditableTextBox(TEXT("SEditableTextBox"));
-	static const FName Type_SMultiLineEditableTextBox(TEXT("SMultiLineEditableTextBox"));
-	const FName Type = Widget->GetType();
-	return Type == Type_SEditableText || Type == Type_SEditableTextBox || Type == Type_SMultiLineEditableTextBox;
-}
-
-// UMG 的 EditableTextBox 把 SEditableTextBox 包在容器里，命中容器时往下找第一个可编辑控件
-static TSharedPtr<SWidget> SDFindEditableChild(const TSharedRef<SWidget>& Widget, int32 Depth = 0)
-{
-	if (SDIsEditableText(Widget))
-	{
-		return Widget;
-	}
-	if (Depth >= 4 || !Widget->GetChildren())
-	{
-		return nullptr;
-	}
-	for (int32 Index = 0; Index < Widget->GetChildren()->Num(); ++Index)
-	{
-		if (const TSharedPtr<SWidget> Found = SDFindEditableChild(Widget->GetChildren()->GetChildAt(Index), Depth + 1))
-		{
-			return Found;
-		}
-	}
-	return nullptr;
-}
-
-static void SDSelectAllText(const TSharedRef<SWidget>& Widget)
-{
-	static const FName Type_SEditableText(TEXT("SEditableText"));
-	static const FName Type_SEditableTextBox(TEXT("SEditableTextBox"));
-	static const FName Type_SMultiLineEditableTextBox(TEXT("SMultiLineEditableTextBox"));
-	const FName Type = Widget->GetType();
-	if (Type == Type_SEditableText)
-	{
-		StaticCastSharedRef<SEditableText>(Widget)->SelectAllText();
-	}
-	else if (Type == Type_SEditableTextBox)
-	{
-		StaticCastSharedRef<SEditableTextBox>(Widget)->SelectAllText();
-	}
-	else if (Type == Type_SMultiLineEditableTextBox)
-	{
-		StaticCastSharedRef<SMultiLineEditableTextBox>(Widget)->SelectAllText();
-	}
-}
-
-// 只在同帧内短暂打开后台输入开关，结束后恢复
-static void SDWithBackgroundInput(const TFunction<void(FSlateApplication&)>& Action)
-{
-	FSlateApplication& SlateApp = FSlateApplication::Get();
-	const bool bHandleInactiveInput = SlateApp.GetHandleDeviceInputWhenApplicationNotActive();
-	SlateApp.SetHandleDeviceInputWhenApplicationNotActive(true);
-	ON_SCOPE_EXIT
-	{
-		SlateApp.SetHandleDeviceInputWhenApplicationNotActive(bHandleInactiveInput);
-	};
-	Action(SlateApp);
-}
-
-static void SDTypeCharacters(const FString& Text)
-{
-	const uint32 UserIndex = static_cast<uint32>(FSlateApplication::Get().GetUserIndexForKeyboard());
-	for (const TCHAR Character : Text)
-	{
-		FSlateApplication::Get().ProcessKeyCharEvent(FCharacterEvent(Character, FModifierKeysState(), UserIndex, false));
-	}
-}
-
-FString UAgentSlateDriverFunctionLib::InputText(const FString& Locator, const FString& WindowFilter, int32 MatchIndex, const FString& Text, bool bReplace, bool bCommit)
-{
-	if (!FSlateApplication::IsInitialized())
-	{
-		return SDResult(false, TEXT("Slate is not initialized"));
-	}
-	const FSDLocator ParsedLocator = SDParseLocator(Locator);
-	if (ParsedLocator.IsEmpty())
-	{
-		return SDResult(false, TEXT("Locator is empty"));
-	}
-	TArray<FSDMatch> Matches;
-	SDFindMatches(ParsedLocator, WindowFilter, Matches);
-	TArray<FString> ExtraFields;
-	ExtraFields.Add(AgentJson::PairInt(TEXT("match_count"), Matches.Num()));
-	if (!Matches.IsValidIndex(MatchIndex))
-	{
-		return SDResult(false, FString::Printf(TEXT("No widget at match index %d"), MatchIndex), ExtraFields);
-	}
-	const FSDMatch& Match = Matches[MatchIndex];
-	ExtraFields.Add(AgentJson::PairRaw(TEXT("target"), SDMatchJson(Match)));
-	const TSharedPtr<SWidget> Editable = SDFindEditableChild(Match.Widget.ToSharedRef());
-	if (!Editable.IsValid())
-	{
-		return SDResult(false, TEXT("Target is not an editable text widget and has no editable child"), ExtraFields);
-	}
-	if (!Editable->SupportsKeyboardFocus())
-	{
-		return SDResult(false, TEXT("Editable widget does not support keyboard focus"), ExtraFields);
-	}
-	ExtraFields.Add(AgentJson::PairRaw(TEXT("editable"), SDDescribeWidget(Editable, Editable->GetTickSpaceGeometry())));
-	const int32 RequestId = SDRegisterInput();
-	ExtraFields.Add(AgentJson::PairInt(TEXT("request_id"), RequestId));
-
-	const TWeakPtr<SWidget> WeakEditable = Editable;
-	SDQueueInput([WeakEditable, Text, bReplace, bCommit, RequestId]()
-	{
-		const TSharedPtr<SWidget> Widget = WeakEditable.Pin();
-		if (!Widget.IsValid())
-		{
-			if (SDInputResults.Contains(RequestId))
-			{
-				SDInputResults[RequestId] = SDResult(false, TEXT("Editable widget was destroyed before input"), {AgentJson::PairBool(TEXT("pending"), false)});
-			}
-			return;
-		}
-		const TSharedRef<SWidget> WidgetRef = Widget.ToSharedRef();
-		SDWithBackgroundInput([&](FSlateApplication& SlateApp)
-		{
-			SlateApp.SetKeyboardFocus(WidgetRef, EFocusCause::SetDirectly);
-			// 全选后输入：字符事件替换选中内容。不用 SetText，那样不经过 OnTextChanged，业务侧收不到
-			if (bReplace)
-			{
-				SDSelectAllText(WidgetRef);
-			}
-			SDTypeCharacters(Text);
-			if (bCommit)
-			{
-				const uint32 UserIndex = static_cast<uint32>(SlateApp.GetUserIndexForKeyboard());
-				const FKeyEvent EnterEvent(EKeys::Enter, FModifierKeysState(), UserIndex, false, 0, 0);
-				SlateApp.ProcessKeyDownEvent(EnterEvent);
-				SlateApp.ProcessKeyUpEvent(EnterEvent);
-			}
-		});
-		// 提交回调可能改值、弹窗可能关闭；等两帧再回读
-		SDQueueDelayed(2, [WeakEditable, Text, RequestId]()
-		{
-			TArray<FString> Fields;
-			Fields.Add(AgentJson::PairBool(TEXT("pending"), false));
-			Fields.Add(AgentJson::Pair(TEXT("expected"), Text));
-			const TSharedPtr<SWidget> After = WeakEditable.Pin();
-			bool bSuccess = false;
-			if (!After.IsValid())
-			{
-				// 提交后控件消失（如搜索框所在弹窗关闭），无法回读，不当作失败
-				Fields.Add(AgentJson::Pair(TEXT("actual"), TEXT("(target destroyed)")));
-				bSuccess = true;
-			}
-			else
-			{
-				const FString Actual = SDGetWidgetText(After.ToSharedRef());
-				Fields.Add(AgentJson::Pair(TEXT("actual"), Actual));
-				bSuccess = Actual == Text;
-			}
-			if (SDInputResults.Contains(RequestId))
-			{
-				SDInputResults[RequestId] = SDResult(bSuccess, bSuccess ? FString() : TEXT("Text readback does not match the requested value"), Fields);
-			}
-		});
-	});
-	return SDResult(true, FString(), ExtraFields);
-}
-
-FString UAgentSlateDriverFunctionLib::PressKey(const FString& KeyName, bool bCtrl, bool bShift, bool bAlt)
-{
-	if (!FSlateApplication::IsInitialized())
-	{
-		return SDResult(false, TEXT("Slate is not initialized"));
-	}
-	const FKey Key(*KeyName);
-	if (!Key.IsValid())
-	{
-		return SDResult(false, FString::Printf(TEXT("Unknown key: %s"), *KeyName));
-	}
-	TArray<FString> ExtraFields;
-	ExtraFields.Add(AgentJson::PairRaw(TEXT("focus"), SDDescribeFocus()));
-	SDQueueInput([Key, bCtrl, bShift, bAlt]()
-	{
-		FSlateApplication& SlateApp = FSlateApplication::Get();
-		const uint32* KeyCodePtr = nullptr;
-		const uint32* CharCodePtr = nullptr;
-		FInputKeyManager::Get().GetCodesFromKey(Key, KeyCodePtr, CharCodePtr);
-		const FModifierKeysState ModifierKeys(bShift, false, bCtrl, false, bAlt, false, false, false, false);
-		const uint32 UserIndex = static_cast<uint32>(SlateApp.GetUserIndexForKeyboard());
-		const FKeyEvent KeyEvent(Key, ModifierKeys, UserIndex, false, CharCodePtr ? *CharCodePtr : 0, KeyCodePtr ? *KeyCodePtr : 0);
-		SlateApp.ProcessKeyDownEvent(KeyEvent);
-		// 普通退格由字符事件处理，Ctrl/Alt 组合由按键事件处理
-		if (Key == EKeys::BackSpace && !bCtrl && !bAlt)
-		{
-			SlateApp.ProcessKeyCharEvent(FCharacterEvent(TCHAR(8), ModifierKeys, UserIndex, false));
-		}
-		// 新增 ticker 可能在同帧执行，用帧号保证抬起至少晚两帧
-		const uint64 ReleaseFrame = GFrameCounter + 2;
-		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([KeyEvent, ReleaseFrame](float)
-		{
-			if (GFrameCounter < ReleaseFrame)
-			{
-				return true;
-			}
-			if (FSlateApplication::IsInitialized())
-			{
-				FSlateApplication& SlateApp = FSlateApplication::Get();
-				const bool bHandleInactiveInput = SlateApp.GetHandleDeviceInputWhenApplicationNotActive();
-				SlateApp.SetHandleDeviceInputWhenApplicationNotActive(true);
-				ON_SCOPE_EXIT
-				{
-					SlateApp.SetHandleDeviceInputWhenApplicationNotActive(bHandleInactiveInput);
-				};
-				SlateApp.ProcessKeyUpEvent(KeyEvent);
-			}
-			return false;
-		}));
-	});
-	return SDResult(true, FString(), ExtraFields);
-}
-
-FString UAgentSlateDriverFunctionLib::TypeText(const FString& Text)
-{
-	if (!FSlateApplication::IsInitialized())
-	{
-		return SDResult(false, TEXT("Slate is not initialized"));
-	}
-	TArray<FString> ExtraFields;
-	ExtraFields.Add(AgentJson::PairRaw(TEXT("focus"), SDDescribeFocus()));
-	SDQueueInput([Text]()
-	{
-		FSlateApplication& SlateApp = FSlateApplication::Get();
-		const uint32 UserIndex = static_cast<uint32>(SlateApp.GetUserIndexForKeyboard());
-		for (const TCHAR Character : Text)
-		{
-			SlateApp.ProcessKeyCharEvent(FCharacterEvent(Character, FModifierKeysState(), UserIndex, false));
-		}
-	});
-	return SDResult(true, FString(), ExtraFields);
-}
-
-// ==================== 按住 / 抬起 / 移动 ====================
+// ==================== 输入时间线 ====================
+// 输入只提供原子步骤，全部排在一条时间线上：每帧最多完成一步，相邻两步至少隔一帧，前一步完成才执行下一步，
+// 某步失败时取消其后所有步骤。点击、长按、拖动、文本输入等组合由 Skill 的 Python 模块 ue_input 拼装。
 
 enum class ESDStep : uint8
 {
@@ -1397,7 +852,6 @@ enum class ESDStep : uint8
 	Failed,
 };
 
-// 时间线一步：Run 每帧调用一次直到不再是 Running；RequestId 用于取消时补写结果
 struct FSDTimelineStep
 {
 	int32 RequestId = 0;
@@ -1413,6 +867,19 @@ static TSet<FKey> SDHeldButtons;
 static TMap<FKey, int32> SDHoldSerials;
 static int32 SDNextHoldSerial = 0;
 static TOptional<FVector2D> SDPointerPos;
+
+// 只在本次输入执行期间打开后台输入开关，结束后恢复
+static void SDWithBackgroundInput(const TFunction<void(FSlateApplication&)>& Action)
+{
+	FSlateApplication& SlateApp = FSlateApplication::Get();
+	const bool bHandleInactiveInput = SlateApp.GetHandleDeviceInputWhenApplicationNotActive();
+	SlateApp.SetHandleDeviceInputWhenApplicationNotActive(true);
+	ON_SCOPE_EXIT
+	{
+		SlateApp.SetHandleDeviceInputWhenApplicationNotActive(bHandleInactiveInput);
+	};
+	Action(SlateApp);
+}
 
 static bool SDIsPending(int32 RequestId)
 {
@@ -1441,7 +908,6 @@ static void SDCancelTimeline(const FString& Message)
 	SDTimeline.Empty();
 }
 
-// 每帧最多完成一步，相邻两步之间至少隔一帧（按下与抬起不会落在同一帧）
 static bool SDTickTimeline(float)
 {
 	if (!FSlateApplication::IsInitialized() || SDTimeline.Num() == 0)
@@ -1450,14 +916,23 @@ static bool SDTickTimeline(float)
 		bSDTimelineTicking = false;
 		return false;
 	}
+	const FSDTimelineStep Step = SDTimeline[0];
 	ESDStep State = ESDStep::Running;
 	SDWithBackgroundInput([&](FSlateApplication&)
 	{
-		State = SDTimeline[0].Run();
+		State = Step.Run();
 	});
-	if (State != ESDStep::Running && SDTimeline.Num() > 0)
+	if (State != ESDStep::Running)
 	{
-		SDTimeline.RemoveAt(0);
+		// 步骤没写结果时按完成状态补一条，调用方总能读到终态
+		if (SDIsPending(Step.RequestId))
+		{
+			SDSetInputResult(Step.RequestId, State == ESDStep::Done, State == ESDStep::Done ? FString() : FString(TEXT("Input step failed")));
+		}
+		if (SDTimeline.Num() > 0 && SDTimeline[0].RequestId == Step.RequestId)
+		{
+			SDTimeline.RemoveAt(0);
+		}
 		if (State == ESDStep::Failed)
 		{
 			SDCancelTimeline(TEXT("Cancelled because an earlier queued input failed"));
@@ -1471,28 +946,23 @@ static bool SDTickTimeline(float)
 	return true;
 }
 
-static void SDTimelineAdd(int32 RequestId, TFunction<ESDStep()> Run)
+// 登记请求并排进时间线；Run 每帧调用一次直到不再返回 Running
+static int32 SDTimelineAdd(TFunction<ESDStep(int32)> Run)
 {
-	SDTimeline.Add({RequestId, MoveTemp(Run)});
+	const int32 RequestId = SDRegisterInput();
+	SDTimeline.Add({RequestId, [RequestId, Run = MoveTemp(Run)]() { return Run(RequestId); }});
 	if (!bSDTimelineTicking)
 	{
 		bSDTimelineTicking = true;
 		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateStatic(&SDTickTimeline));
 	}
+	return RequestId;
 }
 
-static TFunction<ESDStep()> SDWaitStep(float Seconds)
+static FString SDQueued(int32 RequestId, TArray<FString> ExtraFields = TArray<FString>())
 {
-	const TSharedRef<double> Start = MakeShared<double>(-1.0);
-	return [Start, Seconds]()
-	{
-		const double Now = FPlatformTime::Seconds();
-		if (*Start < 0.0)
-		{
-			*Start = Now;
-		}
-		return Now - *Start >= Seconds ? ESDStep::Done : ESDStep::Running;
-	};
+	ExtraFields.Add(AgentJson::PairInt(TEXT("request_id"), RequestId));
+	return SDResult(true, FString(), ExtraFields);
 }
 
 static FVector2D SDPointer()
@@ -1520,6 +990,28 @@ static void SDReleaseKey(const FKey& Key)
 	}
 }
 
+// 按住鼠标键期间关掉 Slate 的合成光标移动：它按真实光标位置补发移动，按钮会判定指针已离开并取消按下，抬起时不算点击
+static TOptional<int32> SDSavedSyntheticMoves;
+
+static void SDSuppressSyntheticMoves(bool bSuppress)
+{
+	IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(TEXT("Slate.EnableSyntheticCursorMoves"));
+	if (!Var)
+	{
+		return;
+	}
+	if (bSuppress && !SDSavedSyntheticMoves.IsSet())
+	{
+		SDSavedSyntheticMoves = Var->GetInt();
+		Var->Set(0, ECVF_SetByCode);
+	}
+	else if (!bSuppress && SDSavedSyntheticMoves.IsSet())
+	{
+		Var->Set(SDSavedSyntheticMoves.GetValue(), ECVF_SetByCode);
+		SDSavedSyntheticMoves.Reset();
+	}
+}
+
 static void SDReleaseButton(const FKey& Button)
 {
 	if (SDHeldButtons.Remove(Button) > 0)
@@ -1527,6 +1019,10 @@ static void SDReleaseButton(const FKey& Button)
 		SDHoldSerials.Remove(Button);
 		const FVector2D Pos = SDPointer();
 		FSlateApplication::Get().ProcessMouseButtonUpEvent(SDMakePointerEvent(Pos, Pos, SDHeldButtons, Button, 0.0f));
+		if (SDHeldButtons.Num() == 0)
+		{
+			SDSuppressSyntheticMoves(false);
+		}
 	}
 }
 
@@ -1562,7 +1058,201 @@ static void SDArmWatchdog(const FKey& Key, int32 Serial, float MaxHoldSeconds)
 	}));
 }
 
-FString UAgentSlateDriverFunctionLib::KeyDown(const FString& KeyName, bool bCtrl, bool bShift, bool bAlt, float HoldSeconds, float MaxHoldSeconds)
+// 会接收鼠标按下的路径：有捕获时是捕获者路径，否则是光标下的命中路径
+static FWidgetPath SDInputPathAt(const FVector2D& Pos)
+{
+	FSlateApplication& SlateApp = FSlateApplication::Get();
+	const uint32 UserIndex = static_cast<uint32>(SlateApp.GetUserIndexForMouse());
+	const TSharedPtr<FSlateUser> User = SlateApp.GetUser(UserIndex);
+	if (User.IsValid() && User->HasCapture(FSlateApplicationBase::CursorPointerIndex))
+	{
+		const FPointerEvent Probe = SDMakePointerEvent(Pos, Pos, SDHeldButtons, EKeys::Invalid, 0.0f);
+		return User->GetCaptorPath(FSlateApplicationBase::CursorPointerIndex, FWeakWidgetPath::EInterruptedPathHandling::ReturnInvalid, &Probe);
+	}
+	return SlateApp.LocateWindowUnderMouse(Pos, SlateApp.GetInteractiveTopLevelWindows(), false, UserIndex);
+}
+
+// 最上层控件是目标本身或其子节点才算点中；被遮挡时最上层是别的控件
+static bool SDHitsTarget(const FWidgetPath& Path, const TSharedPtr<SWidget>& Target)
+{
+	if (!Path.IsValid() || Path.Widgets.Num() == 0 || !Target.IsValid() || !Target->GetVisibility().IsVisible())
+	{
+		return false;
+	}
+	const TSharedPtr<SWidget> Top = Path.Widgets.Last().Widget;
+	return Top == Target || SDIsAncestorOf(Target, Top);
+}
+
+static FString SDPathHitJson(const FWidgetPath& Path)
+{
+	if (!Path.IsValid() || Path.Widgets.Num() == 0)
+	{
+		return TEXT("null");
+	}
+	const FArrangedWidget& Top = Path.Widgets.Last();
+	return SDDescribeWidget(Top.Widget, Top.Geometry);
+}
+
+static bool SDResolveMatch(const FString& Locator, const FString& WindowFilter, int32 MatchIndex, TArray<FString>& ExtraFields, FSDMatch& OutMatch, FString& OutError)
+{
+	const FSDLocator ParsedLocator = SDParseLocator(Locator);
+	if (ParsedLocator.IsEmpty())
+	{
+		OutError = TEXT("Locator is empty");
+		return false;
+	}
+	TArray<FSDMatch> Matches;
+	SDFindMatches(ParsedLocator, WindowFilter, Matches);
+	ExtraFields.Add(AgentJson::PairInt(TEXT("match_count"), Matches.Num()));
+	if (!Matches.IsValidIndex(MatchIndex))
+	{
+		OutError = FString::Printf(TEXT("No widget at match index %d"), MatchIndex);
+		return false;
+	}
+	OutMatch = Matches[MatchIndex];
+	ExtraFields.Add(AgentJson::PairRaw(TEXT("target"), SDMatchJson(OutMatch)));
+	return true;
+}
+
+// ==================== 文本控件 ====================
+
+static bool SDIsEditableText(const TSharedRef<SWidget>& Widget)
+{
+	static const FName Type_SEditableText(TEXT("SEditableText"));
+	static const FName Type_SEditableTextBox(TEXT("SEditableTextBox"));
+	static const FName Type_SMultiLineEditableText(TEXT("SMultiLineEditableText"));
+	static const FName Type_SMultiLineEditableTextBox(TEXT("SMultiLineEditableTextBox"));
+	const FName Type = Widget->GetType();
+	return Type == Type_SEditableText || Type == Type_SEditableTextBox || Type == Type_SMultiLineEditableText || Type == Type_SMultiLineEditableTextBox;
+}
+
+// 命中的控件本身不接受焦点时（如外层容器），往下找第一个可编辑控件
+static TSharedPtr<SWidget> SDFindEditableChild(const TSharedRef<SWidget>& Widget, int32 Depth = 0)
+{
+	if (SDIsEditableText(Widget))
+	{
+		return Widget;
+	}
+	if (Depth >= 4 || !Widget->GetChildren())
+	{
+		return nullptr;
+	}
+	for (int32 Index = 0; Index < Widget->GetChildren()->Num(); ++Index)
+	{
+		if (const TSharedPtr<SWidget> Found = SDFindEditableChild(Widget->GetChildren()->GetChildAt(Index), Depth + 1))
+		{
+			return Found;
+		}
+	}
+	return nullptr;
+}
+
+static void SDSelectAllText(const TSharedRef<SWidget>& Widget)
+{
+	static const FName Type_SEditableText(TEXT("SEditableText"));
+	static const FName Type_SEditableTextBox(TEXT("SEditableTextBox"));
+	static const FName Type_SMultiLineEditableText(TEXT("SMultiLineEditableText"));
+	static const FName Type_SMultiLineEditableTextBox(TEXT("SMultiLineEditableTextBox"));
+	const FName Type = Widget->GetType();
+	if (Type == Type_SEditableText)
+	{
+		StaticCastSharedRef<SEditableText>(Widget)->SelectAllText();
+	}
+	else if (Type == Type_SEditableTextBox)
+	{
+		StaticCastSharedRef<SEditableTextBox>(Widget)->SelectAllText();
+	}
+	else if (Type == Type_SMultiLineEditableText)
+	{
+		StaticCastSharedRef<SMultiLineEditableText>(Widget)->SelectAllText();
+	}
+	else if (Type == Type_SMultiLineEditableTextBox)
+	{
+		StaticCastSharedRef<SMultiLineEditableTextBox>(Widget)->SelectAllText();
+	}
+}
+
+// ==================== 焦点与文本 ====================
+
+FString UAgentSlateDriverFunctionLib::FocusWidget(const FString& Locator, const FString& WindowFilter, int32 MatchIndex)
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return SDResult(false, TEXT("Slate is not initialized"));
+	}
+	TArray<FString> ExtraFields;
+	FSDMatch Match;
+	FString Error;
+	if (!SDResolveMatch(Locator, WindowFilter, MatchIndex, ExtraFields, Match, Error))
+	{
+		return SDResult(false, Error, ExtraFields);
+	}
+	const TSharedRef<SWidget> Widget = Match.Widget.ToSharedRef();
+	const TSharedPtr<SWidget> Focusable = Widget->SupportsKeyboardFocus() ? TSharedPtr<SWidget>(Widget) : SDFindEditableChild(Widget);
+	if (!Focusable.IsValid() || !Focusable->SupportsKeyboardFocus())
+	{
+		return SDResult(false, TEXT("Widget does not support keyboard focus and has no editable child"), ExtraFields);
+	}
+	ExtraFields.Add(AgentJson::PairRaw(TEXT("focusable"), SDDescribeWidget(Focusable, Focusable->GetTickSpaceGeometry())));
+	// 直接设焦点，不依赖点击路由（编辑器不在前台时点击可能拿不到焦点）
+	const TWeakPtr<SWidget> WeakFocusable = Focusable;
+	const int32 RequestId = SDTimelineAdd([WeakFocusable](int32 Id)
+	{
+		const TSharedPtr<SWidget> Target = WeakFocusable.Pin();
+		if (!Target.IsValid())
+		{
+			SDSetInputResult(Id, false, TEXT("Widget was destroyed before focus"));
+			return ESDStep::Failed;
+		}
+		FSlateApplication::Get().SetKeyboardFocus(Target, EFocusCause::SetDirectly);
+		return ESDStep::Done;
+	});
+	return SDQueued(RequestId, ExtraFields);
+}
+
+FString UAgentSlateDriverFunctionLib::SelectAllText()
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return SDResult(false, TEXT("Slate is not initialized"));
+	}
+	const int32 RequestId = SDTimelineAdd([](int32 Id)
+	{
+		const TSharedPtr<SWidget> Focused = FSlateApplication::Get().GetKeyboardFocusedWidget();
+		if (!Focused.IsValid() || !SDIsEditableText(Focused.ToSharedRef()))
+		{
+			SDSetInputResult(Id, false, TEXT("Keyboard focus is not an editable text widget"), {AgentJson::PairRaw(TEXT("focus"), SDDescribeFocus())});
+			return ESDStep::Failed;
+		}
+		SDSelectAllText(Focused.ToSharedRef());
+		return ESDStep::Done;
+	});
+	return SDQueued(RequestId);
+}
+
+FString UAgentSlateDriverFunctionLib::TypeText(const FString& Text)
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return SDResult(false, TEXT("Slate is not initialized"));
+	}
+	const int32 RequestId = SDTimelineAdd([Text](int32 Id)
+	{
+		FSlateApplication& SlateApp = FSlateApplication::Get();
+		const uint32 UserIndex = static_cast<uint32>(SlateApp.GetUserIndexForKeyboard());
+		for (const TCHAR Character : Text)
+		{
+			SlateApp.ProcessKeyCharEvent(FCharacterEvent(Character, FModifierKeysState(), UserIndex, false));
+		}
+		SDSetInputResult(Id, true, FString(), {AgentJson::PairRaw(TEXT("focus"), SDDescribeFocus())});
+		return ESDStep::Done;
+	});
+	return SDQueued(RequestId, {AgentJson::PairRaw(TEXT("focus"), SDDescribeFocus())});
+}
+
+// ==================== 键盘 ====================
+
+FString UAgentSlateDriverFunctionLib::KeyDown(const FString& KeyName, bool bCtrl, bool bShift, bool bAlt, float MaxHoldSeconds)
 {
 	if (!FSlateApplication::IsInitialized())
 	{
@@ -1577,41 +1267,29 @@ FString UAgentSlateDriverFunctionLib::KeyDown(const FString& KeyName, bool bCtrl
 	{
 		return SDResult(false, TEXT("Mouse buttons go through MouseDown"));
 	}
-	const int32 RequestId = SDRegisterInput();
-	TArray<FString> ExtraFields;
-	ExtraFields.Add(AgentJson::PairRaw(TEXT("focus"), SDDescribeFocus()));
-	ExtraFields.Add(AgentJson::PairInt(TEXT("request_id"), RequestId));
-	const bool bTimed = HoldSeconds > 0.f;
-	SDTimelineAdd(RequestId, [Key, bCtrl, bShift, bAlt, MaxHoldSeconds, bTimed, RequestId]()
+	const int32 RequestId = SDTimelineAdd([Key, bCtrl, bShift, bAlt, MaxHoldSeconds](int32 Id)
 	{
 		if (SDHeldKeys.Contains(Key))
 		{
-			SDSetInputResult(RequestId, false, TEXT("Key is already held; release it first"));
+			SDSetInputResult(Id, false, TEXT("Key is already held; release it first"));
 			return ESDStep::Failed;
 		}
+		FSlateApplication& SlateApp = FSlateApplication::Get();
 		const FKeyEvent Event = SDMakeKeyEvent(Key, bCtrl, bShift, bAlt);
-		const bool bHandled = FSlateApplication::Get().ProcessKeyDownEvent(Event);
+		const bool bHandled = SlateApp.ProcessKeyDownEvent(Event);
+		// 普通退格由字符事件处理，Ctrl/Alt 组合由按键事件处理
+		if (Key == EKeys::BackSpace && !bCtrl && !bAlt)
+		{
+			SlateApp.ProcessKeyCharEvent(FCharacterEvent(TCHAR(8), Event.GetModifierKeys(), Event.GetUserIndex(), false));
+		}
 		SDHeldKeys.Add(Key, Event);
 		const int32 Serial = ++SDNextHoldSerial;
 		SDHoldSerials.Add(Key, Serial);
 		SDArmWatchdog(Key, Serial, MaxHoldSeconds);
-		if (!bTimed)
-		{
-			SDSetInputResult(RequestId, true, FString(), {AgentJson::PairBool(TEXT("handled"), bHandled)});
-		}
+		SDSetInputResult(Id, true, FString(), {AgentJson::PairBool(TEXT("handled"), bHandled)});
 		return ESDStep::Done;
 	});
-	if (bTimed)
-	{
-		SDTimelineAdd(RequestId, SDWaitStep(HoldSeconds));
-		SDTimelineAdd(RequestId, [Key, HoldSeconds, RequestId]()
-		{
-			SDReleaseKey(Key);
-			SDSetInputResult(RequestId, true, FString(), {AgentJson::PairFloat(TEXT("held_seconds"), HoldSeconds)});
-			return ESDStep::Done;
-		});
-	}
-	return SDResult(true, FString(), ExtraFields);
+	return SDQueued(RequestId, {AgentJson::PairRaw(TEXT("focus"), SDDescribeFocus())});
 }
 
 FString UAgentSlateDriverFunctionLib::KeyUp(const FString& KeyName)
@@ -1625,22 +1303,22 @@ FString UAgentSlateDriverFunctionLib::KeyUp(const FString& KeyName)
 	{
 		return SDResult(false, FString::Printf(TEXT("Unknown key: %s"), *KeyName));
 	}
-	const int32 RequestId = SDRegisterInput();
-	SDTimelineAdd(RequestId, [Key, RequestId]()
+	const int32 RequestId = SDTimelineAdd([Key](int32 Id)
 	{
 		if (!SDHeldKeys.Contains(Key))
 		{
-			SDSetInputResult(RequestId, false, TEXT("Key is not held by AgentTools (already released, or auto released after MaxHoldSeconds)"));
+			SDSetInputResult(Id, false, TEXT("Key is not held by AgentTools (already released, or auto released after MaxHoldSeconds)"));
 			return ESDStep::Failed;
 		}
 		SDReleaseKey(Key);
-		SDSetInputResult(RequestId, true, FString());
 		return ESDStep::Done;
 	});
-	return SDResult(true, FString(), {AgentJson::PairInt(TEXT("request_id"), RequestId)});
+	return SDQueued(RequestId);
 }
 
-FString UAgentSlateDriverFunctionLib::MouseDown(const FString& Locator, const FString& WindowFilter, int32 MatchIndex, float X, float Y, const FString& Button, float HoldSeconds, float MaxHoldSeconds)
+// ==================== 鼠标 ====================
+
+FString UAgentSlateDriverFunctionLib::MouseDown(float X, float Y, const FString& Button, bool bDoubleClick, const FString& CheckLocator, const FString& WindowFilter, int32 MatchIndex, float MaxHoldSeconds)
 {
 	if (!FSlateApplication::IsInitialized())
 	{
@@ -1651,83 +1329,85 @@ FString UAgentSlateDriverFunctionLib::MouseDown(const FString& Locator, const FS
 	{
 		return SDResult(false, FString::Printf(TEXT("Unknown mouse button: %s"), *Button));
 	}
-	FVector2D Pos(X, Y);
-	TWeakPtr<SWidget> Target;
-	const bool bHasTarget = !Locator.IsEmpty();
+	const FVector2D Pos(X, Y);
+	const bool bCheck = !CheckLocator.IsEmpty();
+	TWeakPtr<SWidget> Check;
 	TArray<FString> ExtraFields;
-	if (bHasTarget)
+	if (bCheck)
 	{
-		const FSDLocator ParsedLocator = SDParseLocator(Locator);
-		TArray<FSDMatch> Matches;
-		if (!ParsedLocator.IsEmpty())
+		FSDMatch Match;
+		FString Error;
+		if (!SDResolveMatch(CheckLocator, WindowFilter, MatchIndex, ExtraFields, Match, Error))
 		{
-			SDFindMatches(ParsedLocator, WindowFilter, Matches);
+			return SDResult(false, Error, ExtraFields);
 		}
-		ExtraFields.Add(AgentJson::PairInt(TEXT("match_count"), Matches.Num()));
-		if (!Matches.IsValidIndex(MatchIndex))
-		{
-			return SDResult(false, FString::Printf(TEXT("No widget at match index %d"), MatchIndex), ExtraFields);
-		}
-		const FSDMatch& Match = Matches[MatchIndex];
-		ExtraFields.Add(AgentJson::PairRaw(TEXT("target"), SDMatchJson(Match)));
-		Pos = Match.Info.Pos + Match.Info.Size * 0.5;
-		Target = Match.Widget;
+		Check = Match.Widget;
 	}
-	const int32 RequestId = SDRegisterInput();
 	ExtraFields.Add(AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)));
 	ExtraFields.Add(AgentJson::PairRaw(TEXT("hit"), SDDescribeHit(Pos)));
-	ExtraFields.Add(AgentJson::PairInt(TEXT("request_id"), RequestId));
-	const bool bTimed = HoldSeconds > 0.f;
-	SDTimelineAdd(RequestId, [ButtonKey, Pos, Target, bHasTarget, MaxHoldSeconds, bTimed, RequestId]()
+	const int32 RequestId = SDTimelineAdd([ButtonKey, Pos, bDoubleClick, bCheck, Check, MaxHoldSeconds](int32 Id)
 	{
 		if (SDHeldButtons.Contains(ButtonKey))
 		{
-			SDSetInputResult(RequestId, false, TEXT("Mouse button is already held; release it first"));
+			SDSetInputResult(Id, false, TEXT("Mouse button is already held; release it first"));
 			return ESDStep::Failed;
 		}
-		FSlateApplication& SlateApp = FSlateApplication::Get();
-		FWidgetPath Path = SlateApp.LocateWindowUnderMouse(Pos, SlateApp.GetInteractiveTopLevelWindows(), false, static_cast<uint32>(SlateApp.GetUserIndexForMouse()));
-		if (!Path.IsValid())
+		auto CheckPath = [&](const FWidgetPath& Path)
 		{
-			SDSetInputResult(RequestId, false, TEXT("No window under the pointer"));
-			return ESDStep::Failed;
-		}
-		const FArrangedWidget& Top = Path.Widgets.Last();
-		const FString Hit = AgentJson::PairRaw(TEXT("hit"), SDDescribeWidget(Top.Widget, Top.Geometry));
-		if (bHasTarget)
-		{
-			const TSharedPtr<SWidget> TargetWidget = Target.Pin();
-			const TSharedPtr<SWidget> TopWidget = Top.Widget;
-			if (!TargetWidget.IsValid() || !TargetWidget->GetVisibility().IsVisible() || !(TopWidget == TargetWidget || SDIsAncestorOf(TargetWidget, TopWidget)))
+			if (!Path.IsValid())
 			{
-				SDSetInputResult(RequestId, false, TEXT("Target check failed: the topmost widget at the press point is neither the target nor its child; it is probably covered or hit-test invisible, so no mouse down was sent"), {Hit});
-				return ESDStep::Failed;
+				SDSetInputResult(Id, false, TEXT("No window under the pointer"));
+				return false;
 			}
+			if (!bCheck)
+			{
+				return true;
+			}
+			const TSharedPtr<SWidget> Target = Check.Pin();
+			if (Target.IsValid() && !Target->IsEnabled())
+			{
+				SDSetInputResult(Id, false, TEXT("Target is disabled; no mouse down was sent"), {AgentJson::PairRaw(TEXT("hit"), SDPathHitJson(Path))});
+				return false;
+			}
+			if (!SDHitsTarget(Path, Target))
+			{
+				SDSetInputResult(Id, false, TEXT("Target check failed: the topmost widget at the press point is neither the target nor its child; it is probably covered or hit-test invisible, so no mouse down was sent"),
+					{AgentJson::PairRaw(TEXT("hit"), SDPathHitJson(Path))});
+				return false;
+			}
+			return true;
+		};
+		FSlateApplication& SlateApp = FSlateApplication::Get();
+		if (!CheckPath(SDInputPathAt(Pos)))
+		{
+			return ESDStep::Failed;
 		}
+		// 先把指针移到落点：悬停或捕获可能因此变化，再查一次才按下
 		SlateApp.ProcessMouseMoveEvent(SDMakePointerEvent(Pos, SDPointer(), SDHeldButtons, EKeys::Invalid, 0.0f));
 		SDPointerPos = Pos;
+		const FWidgetPath Path = SDInputPathAt(Pos);
+		if (!CheckPath(Path))
+		{
+			return ESDStep::Failed;
+		}
 		SDHeldButtons.Add(ButtonKey);
-		SlateApp.ProcessMouseButtonDownEvent(Path.GetWindow()->GetNativeWindow(), SDMakePointerEvent(Pos, Pos, SDHeldButtons, ButtonKey, 0.0f));
+		SDSuppressSyntheticMoves(true);
+		const FPointerEvent Event = SDMakePointerEvent(Pos, Pos, SDHeldButtons, ButtonKey, 0.0f);
+		if (bDoubleClick)
+		{
+			SlateApp.ProcessMouseButtonDoubleClickEvent(Path.GetWindow()->GetNativeWindow(), Event);
+		}
+		else
+		{
+			SlateApp.ProcessMouseButtonDownEvent(Path.GetWindow()->GetNativeWindow(), Event);
+		}
 		const int32 Serial = ++SDNextHoldSerial;
 		SDHoldSerials.Add(ButtonKey, Serial);
 		SDArmWatchdog(ButtonKey, Serial, MaxHoldSeconds);
-		if (!bTimed)
-		{
-			SDSetInputResult(RequestId, true, FString(), {Hit});
-		}
+		SDSetInputResult(Id, true, FString(), {AgentJson::PairRaw(TEXT("hit"), SDPathHitJson(Path))});
 		return ESDStep::Done;
 	});
-	if (bTimed)
-	{
-		SDTimelineAdd(RequestId, SDWaitStep(HoldSeconds));
-		SDTimelineAdd(RequestId, [ButtonKey, HoldSeconds, RequestId]()
-		{
-			SDReleaseButton(ButtonKey);
-			SDSetInputResult(RequestId, true, FString(), {AgentJson::PairFloat(TEXT("held_seconds"), HoldSeconds)});
-			return ESDStep::Done;
-		});
-	}
-	return SDResult(true, FString(), ExtraFields);
+	return SDQueued(RequestId, ExtraFields);
 }
 
 FString UAgentSlateDriverFunctionLib::MouseUp(const FString& Button)
@@ -1741,20 +1421,19 @@ FString UAgentSlateDriverFunctionLib::MouseUp(const FString& Button)
 	{
 		return SDResult(false, FString::Printf(TEXT("Unknown mouse button: %s"), *Button));
 	}
-	const int32 RequestId = SDRegisterInput();
-	SDTimelineAdd(RequestId, [ButtonKey, RequestId]()
+	const int32 RequestId = SDTimelineAdd([ButtonKey](int32 Id)
 	{
 		if (!SDHeldButtons.Contains(ButtonKey))
 		{
-			SDSetInputResult(RequestId, false, TEXT("Mouse button is not held by AgentTools (already released, or auto released after MaxHoldSeconds)"));
+			SDSetInputResult(Id, false, TEXT("Mouse button is not held by AgentTools (already released, or auto released after MaxHoldSeconds)"));
 			return ESDStep::Failed;
 		}
 		const FVector2D Pos = SDPointer();
 		SDReleaseButton(ButtonKey);
-		SDSetInputResult(RequestId, true, FString(), {AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)), AgentJson::PairRaw(TEXT("hit"), SDDescribeHit(Pos))});
+		SDSetInputResult(Id, true, FString(), {AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)), AgentJson::PairRaw(TEXT("hit"), SDDescribeHit(Pos))});
 		return ESDStep::Done;
 	});
-	return SDResult(true, FString(), {AgentJson::PairInt(TEXT("request_id"), RequestId)});
+	return SDQueued(RequestId);
 }
 
 FString UAgentSlateDriverFunctionLib::MouseMove(float X, float Y, int32 Frames)
@@ -1765,10 +1444,9 @@ FString UAgentSlateDriverFunctionLib::MouseMove(float X, float Y, int32 Frames)
 	}
 	const FVector2D To(X, Y);
 	const int32 StepCount = FMath::Max(1, Frames);
-	const int32 RequestId = SDRegisterInput();
 	const TSharedRef<FVector2D> From = MakeShared<FVector2D>(FVector2D::ZeroVector);
 	const TSharedRef<int32> Step = MakeShared<int32>(0);
-	SDTimelineAdd(RequestId, [To, StepCount, From, Step, RequestId]()
+	const int32 RequestId = SDTimelineAdd([To, StepCount, From, Step](int32 Id)
 	{
 		// 起点在执行时取：前面排着的按下/移动完成后才知道指针在哪
 		if (*Step == 0)
@@ -1784,11 +1462,54 @@ FString UAgentSlateDriverFunctionLib::MouseMove(float X, float Y, int32 Frames)
 		{
 			return ESDStep::Running;
 		}
-		SDSetInputResult(RequestId, true, FString(), {AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)), AgentJson::PairRaw(TEXT("hit"), SDDescribeHit(Pos)),
+		SDSetInputResult(Id, true, FString(), {AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)), AgentJson::PairRaw(TEXT("hit"), SDDescribeHit(Pos)),
 			AgentJson::PairBool(TEXT("dragging"), SDHeldButtons.Num() > 0)});
 		return ESDStep::Done;
 	});
-	return SDResult(true, FString(), {AgentJson::PairInt(TEXT("request_id"), RequestId)});
+	return SDQueued(RequestId);
+}
+
+FString UAgentSlateDriverFunctionLib::MouseWheel(float X, float Y, float Delta)
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return SDResult(false, TEXT("Slate is not initialized"));
+	}
+	const FVector2D Pos(X, Y);
+	const int32 RequestId = SDTimelineAdd([Pos, Delta](int32 Id)
+	{
+		FSlateApplication& SlateApp = FSlateApplication::Get();
+		SlateApp.ProcessMouseMoveEvent(SDMakePointerEvent(Pos, SDPointer(), SDHeldButtons, EKeys::Invalid, 0.0f));
+		SDPointerPos = Pos;
+		const bool bHandled = SlateApp.ProcessMouseWheelOrGestureEvent(SDMakePointerEvent(Pos, Pos, SDHeldButtons, EKeys::Invalid, Delta), nullptr);
+		SDSetInputResult(Id, true, bHandled ? FString() : FString(TEXT("No widget handled the wheel event at this point")), {AgentJson::PairBool(TEXT("handled"), bHandled)});
+		return ESDStep::Done;
+	});
+	return SDQueued(RequestId, {AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)), AgentJson::PairRaw(TEXT("hit"), SDDescribeHit(Pos))});
+}
+
+// ==================== 等待与释放 ====================
+
+FString UAgentSlateDriverFunctionLib::WaitInput(float Seconds, int32 Frames)
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return SDResult(false, TEXT("Slate is not initialized"));
+	}
+	const TSharedRef<double> Start = MakeShared<double>(-1.0);
+	const TSharedRef<uint64> StartFrame = MakeShared<uint64>(0);
+	const int32 RequestId = SDTimelineAdd([Seconds, Frames, Start, StartFrame](int32)
+	{
+		if (*Start < 0.0)
+		{
+			*Start = FPlatformTime::Seconds();
+			*StartFrame = GFrameCounter;
+		}
+		const bool bTimeUp = FPlatformTime::Seconds() - *Start >= Seconds;
+		const bool bFramesUp = GFrameCounter - *StartFrame >= static_cast<uint64>(FMath::Max(0, Frames));
+		return bTimeUp && bFramesUp ? ESDStep::Done : ESDStep::Running;
+	});
+	return SDQueued(RequestId);
 }
 
 FString UAgentSlateDriverFunctionLib::ReleaseAllInput()
@@ -1798,7 +1519,7 @@ FString UAgentSlateDriverFunctionLib::ReleaseAllInput()
 		return SDResult(false, TEXT("Slate is not initialized"));
 	}
 	const int32 RequestId = SDRegisterInput();
-	// 不排进时间线：时间线上可能正有一步按住等待，紧急释放要立即生效
+	// 不排进时间线：时间线上可能正有一步在等待，紧急释放要立即生效
 	SDQueueInput([RequestId]()
 	{
 		SDCancelTimeline(TEXT("Cancelled by ReleaseAllInput"));
@@ -1820,5 +1541,23 @@ FString UAgentSlateDriverFunctionLib::ReleaseAllInput()
 		}
 		SDSetInputResult(RequestId, true, FString(), {AgentJson::PairRaw(TEXT("released"), AgentJson::Array(Released))});
 	});
-	return SDResult(true, FString(), {AgentJson::PairInt(TEXT("request_id"), RequestId)});
+	return SDQueued(RequestId);
+}
+
+FString UAgentSlateDriverFunctionLib::GetInputResult(int32 RequestId)
+{
+	if (const FString* Result = SDInputResults.Find(RequestId))
+	{
+		return *Result;
+	}
+	return SDResult(false, TEXT("Unknown or expired input request"), {AgentJson::PairBool(TEXT("pending"), false)});
+}
+
+FString UAgentSlateDriverFunctionLib::WidgetAt(float X, float Y)
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return TEXT("null");
+	}
+	return SDDescribeHit(FVector2D(X, Y));
 }

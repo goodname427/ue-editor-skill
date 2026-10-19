@@ -71,7 +71,7 @@ python scripts/ue_cli.py exec --file do_rename.py --timeout 300             # �
 | `open_asset` | 打开资产编辑器（WBP 设计器、蓝图等） |
 | `wbp_edit` | 改 WBP 并把改动落盘：`list` / `rename` / `set` / `add` / `replace` / `remove` / `save`；改控件默认编译保存，`--no-save` 攒下的改动用 `save` 统一收尾 |
 | `asset_move` | 批量移动/改名资产与引用检查：`check` 先看存在性与引用方，`move` 移动（`--save-referencers`），`redirectors <目录>` 列旧路径残留 |
-| `ui` | 查看与操作编辑器界面：`windows` / `tree` / `find` / `focus` / `click` / `type` / `key` / `scroll` / `keydown` / `keyup` / `mousedown` / `mouseup` / `move` / `drag` / `release`（依赖 AgentTools） |
+| `ui` | 查看与操作编辑器界面：`windows` / `tree` / `find` / `at` / `focus` / `click` / `type` / `key` / `scroll` / `keydown` / `keyup` / `mousedown` / `mouseup` / `move` / `drag` / `release`（依赖 AgentTools；输入由编辑器侧模块 `ue_input` 拼装） |
 | `hold-until.sequence.json` | 按住一个键直到条件成立再抬起：`sequence --lib hold-until --param key=<键> --param "until=<表达式>"` |
 
 新增 Lib 脚本：只组合现有接口、在多个任务里反复手写过的操作才沉淀；模块 docstring 写用法；只用 `ARGS` / `OPTS` 取参数，不要用 `argparse`（解析失败会 `sys.exit`）。
@@ -82,7 +82,7 @@ python scripts/ue_cli.py exec --file do_rename.py --timeout 300             # �
 
 1. **先复用**：查项目既有脚本、参考资料和各脚本 docstring，只读与当前任务相关的内容；没有既有约定时分别用项目 `.codebuddy/ue-editor/lib/` 与 `.codebuddy/ue-editor/references/`，不要每个任务另建一套。
 2. **先验证再收录**：只保存实际跑通且预期会复用的流程，不搬入试错探针；按流程职责命名，Python 用模块 docstring、本地其它语言用注释头，写用途、前置状态、参数、调用方式与成功判据。
-3. **保持简单**：只组合现有接口，不硬编码个人账号或凭证。编辑器内 Python Lib 用 `ARGS` / `OPTS` 接收参数，通过 `exec --file <脚本绝对路径> [参数...]` 调用；本地 Inspector 等脚本用对应运行时直接执行，不发送进 UE Python。`--lib` 仍只查 Skill 自带 Python 脚本。
+3. **保持简单**：只组合现有接口，不硬编码个人账号或凭证。编辑器内 Python Lib 用 `ARGS` / `OPTS` 接收参数，通过 `exec --file <脚本绝对路径> [参数...]` 调用；界面输入一律 `import ue_input`（点击、按键、拖动、滚动、文本输入，见 [slate_driver.md](slate_driver.md#ue_input-组合)），不要直接拼 C++ 原子接口。本地 Inspector 等脚本用对应运行时直接执行，不发送进 UE Python。`--lib` 仍只查 Skill 自带 Python 脚本。
 4. **分清执行位置**：编辑器内脚本不能用 sleep/轮询阻塞当前帧等界面就绪；单段等待用 CLI 的 `--wait-until` / `--wait-log`，多段“等待再执行”沉淀为同目录 `<名称>.sequence.json`，用通用 `sequence` 推进，不自写编排器。本地 Inspector 等调试脚本仍由对应运行时有界等待和清理；sequence 不启动或管理本地进程。
 5. **Reference 按需沉淀**：脚本简单用法留 docstring；复杂的项目入口、前置条件、业务约定、验证路径和已证实限制按主题写入 Reference，有关联脚本再链接。Reference 不依赖可用 Lib：通道失败不妨碍收录其它已验证路径，不能仅以“没有脚本可保留”跳过资料沉淀，也不以记忆替代项目资料。不是每个 Lib 都要配一篇文档；已有项目文档优先链接，不重复复制。记录来源与核验日期，待确认事项单独标出，不作为已验证结论。
 6. **收尾检查与维护**：完成任务、删除探针前，检查是否新确认了可复用入口、世界/调试目标关联、真实调用帧取数方式或页面状态限制；值得保留就更新同主题项目 Reference，只有脚本本身满足复用条件才进 Lib。没有合适收获时不造文件，回复里简述原因。后续变化先核实再更新原条目并重验，不复制版本；资料增多时用简短“什么时候读哪篇”索引，不全量加载。项目 Lib / Reference 不按临时文件清理；权限、危险操作确认和超时不重发规则不变。
