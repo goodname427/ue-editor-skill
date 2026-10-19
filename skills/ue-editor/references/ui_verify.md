@@ -95,7 +95,7 @@ python scripts/ue_cli.py screenshot --pie --instance=1 --name=feature-view --arc
 
 ## 常见场景
 
-- **看 WBP 静态布局**：`exec --lib open_asset <WBP路径>`，等 1~2 秒再 `screenshot`。设计器里 TS 不运行，列表/数据为空。
+- **看 WBP 静态布局**：`exec --lib open_asset <WBP路径>`，等 1~2 秒再 `screenshot`。设计器里脚本逻辑不运行，列表/数据为空。
 - **看运行时界面**：分开确认会话启动、目标页面出现、数据/模型等资源就绪。`pie status=running` 不证明客户端有 PC，控件出现也不证明模型加载完成。启动后用目标控件作为页面等待条件：`exec --lib pie start --wait-until "unreal.AgentSlateDriverFunctionLib.find_widgets('class=<HUD 根控件类>', '') != '[]'" --wait 120 --timeout 150`，资源就绪再查业务加载状态/日志；只有视觉证据时，在有界等待后复查截图。
   - 初期黑屏、空模型先作为加载暂态待确认，不马上归因或委派代码排查。相邻蓝图报错不等于根因；加载稳定后仍异常再分析，等待超时要保留“未就绪/未验证”的结论。
   - HUD 根控件通常铺满整个 PIE 视口，看具体区域要按其中的子控件截。

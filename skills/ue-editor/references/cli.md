@@ -68,7 +68,7 @@ python scripts/ue_cli.py exec --file do_rename.py --timeout 300             # �
 | `api` | API 内省：`search <关键词>` / `methods <类名>` / `help <类名> [方法名]` |
 | `pie` | PIE 启停、状态与世界上下文：`start` / `stop` / `status` / `worlds`（启停需配合 `--wait-until`，见 docstring） |
 | `open_asset` | 打开资产编辑器（WBP 设计器、蓝图等） |
-| `wbp_edit` | 改 WBP 并把改动落盘：`list` / `rename` / `set` / `add` / `replace` / `remove` / `save`；改控件默认编译保存且跑 `Puerts.Gen`，`--no-save` 攒下的改动用 `save` 统一收尾 |
+| `wbp_edit` | 改 WBP 并把改动落盘：`list` / `rename` / `set` / `add` / `replace` / `remove` / `save`；改控件默认编译保存，`--no-save` 攒下的改动用 `save` 统一收尾 |
 | `asset_move` | 批量移动/改名资产与引用检查：`check` 先看存在性与引用方，`move` 移动（`--save-referencers`），`redirectors <目录>` 列旧路径残留 |
 | `ui` | 查看与操作编辑器界面：`windows` / `tree` / `find` / `focus` / `click` / `type` / `key` / `scroll`（依赖 AgentTools） |
 

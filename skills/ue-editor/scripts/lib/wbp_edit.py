@@ -7,7 +7,7 @@ Widget 蓝图写操作：新增 / 改名 / 改属性 / 换控件 / 移除，改�
   exec --lib wbp_edit add <WBP路径> <父控件名|root> <新名> <类> [选项]       在面板下新增控件（追加到末尾，没有插入/替换 API）
   exec --lib wbp_edit replace <WBP路径> <旧控件名> <类> [选项]              同名同槽位换控件（旧实例移出到 Transient）
   exec --lib wbp_edit remove <WBP路径> <控件名>                             从父面板移除并移出 WidgetTree
-  exec --lib wbp_edit save <WBP路径>... [--gen]                            只编译 + 保存，脚本改完蓝图后的收尾（--no-save 攒下的改动在这里统一落盘）
+  exec --lib wbp_edit save <WBP路径>...                                    只编译 + 保存，脚本改完蓝图后的收尾（--no-save 攒下的改动在这里统一落盘）
 
 选项（add / replace）：
   --text=<文本>           同时新建 TextBlock 子控件并设文字（按钮等 Content 控件）
@@ -15,13 +15,12 @@ Widget 蓝图写操作：新增 / 改名 / 改属性 / 换控件 / 移除，改�
   --text-copy=<控件名>    文字控件复制该控件的 font
   --copy=<控件名>         复制该控件的外观属性（widget_style / font / item_style / scroll_bar_style / content_padding /
                           foreground_color / max_list_height 里两边都有的）
-  --no-var                不勾"是变量"：add 默认勾上（保存会刷新 ue_bp.d.ts）；replace 默认沿用旧控件的变量状态
+  --no-var                不勾"是变量"：add 默认勾上；replace 默认沿用旧控件的变量状态
   --var                   replace 强制勾"是变量"
-  --new-name=<名>         replace 时给新控件换名（默认沿用旧名，保持 TS 绑定）
+  --new-name=<名>         replace 时给新控件换名（默认沿用旧名，保持按名字的引用）
   CanvasPanel 槽位：--anchor=minx,miny,maxx,maxy  --offset=l,t,r,b  --align=x,y      replace 不写时沿用旧控件槽位
   横向/纵向/Overlay 槽位：--padding=l,t,r,b  --size=值[,fill|auto]  --halign=left|center|right|fill  --valign=top|center|bottom|fill
   --no-save               只改内存不编译保存（留给后续 save 统一收尾）
-  --gen / --no-gen        add / replace / remove 默认执行 Puerts.Gen（新增或换掉控件要刷新 TS 类型；非 Puerts 工程用 --no-gen）；rename / set / save 默认不执行
 
 - 类写引擎/项目 UMG 类名（Button、TextBlock、MyButton）或蓝图路径（/Game/.../WBP_Foo）。
 - 改前先签出资产（如 p4 edit），只读资产保存会失败；控件查找、槽位字段与排版手法见 references/widget_blueprint_edit.md。
@@ -250,14 +249,6 @@ def _set_var(path, name, value):
             print('is_variable now: %s' % item['is_variable'])
 
 
-def _gen(paths, opts, default_gen):
-    if not (opts.get('gen') or (default_gen and not opts.get('no_gen'))):
-        return
-    for folder in sorted({p.rsplit('/', 1)[0] for p in paths}):
-        unreal.SystemLibrary.execute_console_command(None, 'Puerts.Gen PATH=' + folder)
-        print('Puerts.Gen ' + folder)
-
-
 def _save(path):
     bp = unreal.EditorAssetLibrary.load_asset(path)
     if bp is None:
@@ -269,13 +260,12 @@ def _save(path):
     return bool(saved)
 
 
-def _finish(path, opts, default_gen):
+def _finish(path, opts):
     if opts.get('no_save'):
         print('no-save: blueprint not compiled or saved')
         return
     if not _save(path):
         raise RuntimeError('save failed; check the asset is checked out and writable')
-    _gen([path], opts, default_gen)
 
 
 def _print_slot(path, name):
@@ -296,7 +286,7 @@ elif cmd == 'rename':
     print(str(result.get('message')))
     if not result.get('success'):
         raise RuntimeError('rename failed: ' + str(result))
-    _finish(ARGS[1], OPTS, False)
+    _finish(ARGS[1], OPTS)
 
 elif cmd == 'set':
     if len(ARGS) < 4:
@@ -317,7 +307,7 @@ elif cmd == 'set':
         for w in _flat(path):
             if w['name'] == name:
                 print('is_variable now: %s' % w['is_variable'])
-    _finish(path, OPTS, False)
+    _finish(path, OPTS)
 
 elif cmd in ('add', 'replace'):
     if len(ARGS) < (5 if cmd == 'add' else 4):
@@ -363,7 +353,7 @@ elif cmd in ('add', 'replace'):
         _set_var(path, name, not OPTS.get('no_var'))
     elif cmd == 'replace':
         _set_var(path, name, bool(OPTS.get('var')) or (was_var and not OPTS.get('no_var')))
-    _finish(path, OPTS, True)
+    _finish(path, OPTS)
 
 elif cmd == 'remove':
     if len(ARGS) < 3:
@@ -378,13 +368,12 @@ elif cmd == 'remove':
     parent.remove_child(target)
     target.rename(name + '_Removed', unreal.find_object(None, _TRANSIENT))
     print('removed %s from WidgetTree' % name)
-    _finish(path, OPTS, True)
+    _finish(path, OPTS)
 
 elif cmd == 'save':
     if len(ARGS) < 2:
         _usage('save needs <WBP路径>...')
     failed = [path for path in ARGS[1:] if not _save(path)]
-    _gen(ARGS[1:], OPTS, False)
     if failed:
         raise RuntimeError('failed: ' + ', '.join(failed))
 

@@ -8,11 +8,11 @@
 - **改前签出**：`.uasset` 在版本库里通常是独占签出，改前先签出（P4：`p4 edit -c <CL> <file>`）；只读文件 `save_asset` 会失败或弹窗。
 - **改前先读**：用 `get_all_widgets_flat(path)` 确认控件名，再按名字操作。
 - **改后收尾**：`BlueprintEditorLibrary.compile_blueprint(bp)` → `EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)`；脚本外可直接 `ue_cli.py exec --lib wbp_edit save <路径>...`。
-- **TS 类型（仅 Puerts 工程）**：修改已有蓝图的变量后，保存时编辑器会自动刷新 `ue_bp.d.ts`；新增蓝图或新增控件需执行 `Puerts.Gen PATH=<蓝图所在目录>` 增量生成（`exec --lib wbp_edit save ... --gen` 会顺带执行）。非 Puerts 工程加 `--no-gen`。
+- **项目收尾步骤**：工程若有依赖蓝图结构的生成步骤（如脚本层类型声明），在项目 Reference / Lib 里约定并在保存后执行，本 Skill 不内置。
 
 ## 优先用 wbp_edit Lib
 
-改名、勾变量、加控件、换控件、移除控件用 `exec --lib wbp_edit ...`，用法见脚本 docstring；`add` / `replace` / `remove` 默认编译保存并执行 `Puerts.Gen`（`--no-gen` / `--no-save` 可关）：
+改名、勾变量、加控件、换控件、移除控件用 `exec --lib wbp_edit ...`，用法见脚本 docstring；默认改完即编译保存（`--no-save` 可关）：
 
 ```bash
 exec --lib wbp_edit list  /Game/UI/XXX/WBP_Foo
@@ -98,4 +98,3 @@ ok = unreal.EditorAssetLibrary.rename_asset(src, dst)   # 自动修引用
 - 改名后逐个 `save_asset` 引用方（`asset_move move --save-referencers`）。
 - P4 侧保留历史：对新文件 `p4 revert -k`，再 `p4 move -k -c <CL> <old> <new>`。
 - 旧路径会残留 ObjectRedirector，确认无引用后 `p4 revert` + `p4 delete`；`delete_asset` 不会真删磁盘文件，且包仍被编辑器（打开的编辑器、已加载的类型等）占用时会报 `... is in use` 删不掉，关编辑器后再删。
-- 不同目录下的同名蓝图会在 `ue_bp.d.ts` 中重复声明（tsc 只认第一个），移动时改成不冲突的名字。

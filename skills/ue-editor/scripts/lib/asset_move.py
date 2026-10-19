@@ -8,7 +8,7 @@
 - 改名/移动被其它资产引用时，编辑器会自动签出并改写引用方，过程可能卡 1~3 分钟：加 --timeout 300，返回 Timeout 也不要重发，
   用 exec "print(1)" 探测恢复后看 move 输出核对结果。
 - move 后旧路径只剩 ObjectRedirector；确认旧路径无引用后本地清理（P4：p4 revert + p4 delete；被编辑器占用删不掉时关编辑器再删）。
-- 目标目录先建好（make_directory）；同名蓝图在 ue_bp.d.ts 会重复声明的坑见项目参考资料。
+- 目标目录先建好（make_directory）；改名的项目约束（如脚本绑定的同名冲突）见项目参考资料。
 """
 import unreal
 
