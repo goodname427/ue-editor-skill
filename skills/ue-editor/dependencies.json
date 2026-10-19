@@ -1,0 +1,1 @@
+{"commands": ["python3"], "python_packages": ["pywin32", "pillow"], "agents": ["*"]}

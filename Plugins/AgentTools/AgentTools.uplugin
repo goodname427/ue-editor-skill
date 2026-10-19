@@ -1,0 +1,52 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "AgentTools",
+	"Description": "Agent 通过 Python Remote Execution 操控编辑器所需的 C++ 支持（仅编辑器，由 ue-editor Skill 安装器链接进工程）",
+	"Category": "Other",
+	"CreatedBy": "",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "AgentToolsCommon",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [
+				"Win64"
+			],
+			"TargetAllowList": [
+				"Editor"
+			]
+		},
+		{
+			"Name": "AgentWidgetBlueprintInfoLib",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [
+				"Win64"
+			],
+			"TargetAllowList": [
+				"Editor"
+			]
+		},
+		{
+			"Name": "AgentSlateDriver",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [
+				"Win64"
+			],
+			"TargetAllowList": [
+				"Editor"
+			]
+		}
+	]
+}
