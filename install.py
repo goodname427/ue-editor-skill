@@ -1,24 +1,28 @@
 #!/usr/bin/env python
 """
-ue-editor 安装器 - 把本仓库的 Skill 与 AgentTools 插件链接到 Agent 的 Skill 目录和 UE 工程。
+ue-editor 安装器 - 把本仓库的 Skill、规则与 AgentTools 插件链接到 Agent 目录和 UE 工程。
 
 用法:
-  python install.py --skills <Skill目录> [--skills ...] --project <工程目录或.uproject> [--project ...]
-  python install.py --uninstall --skills <Skill目录> --project <工程目录>   卸载前先关闭编辑器
+  python install.py --skills <Skill目录> --rules <规则目录> --project <工程目录或.uproject>   各项可重复、可只给其中几类
+  python install.py --update                          git pull 后按安装记录逐个复查、修复链接
+  python install.py --uninstall --skills ... --rules ... --project ...   卸载前先关闭编辑器
   python install.py                                   不带参数时交互输入
 
-链接方式（Windows 用目录联接 junction，无需管理员；其它系统用符号链接）:
+链接方式（Windows 目录用联接 junction，无需管理员；文件用符号链接）:
   <Skill目录>/ue-editor                    -> <仓库>/skills/ue-editor
+  <规则目录>/ue-editor.md                  -> <仓库>/rules/ue-editor.md
   <工程>/Plugins/AgentTools/Source         -> <仓库>/Plugins/AgentTools/Source
-  <工程>/Plugins/AgentTools/AgentTools.uplugin  符号链接，失败时退化为硬链接/复制
-  <rules目录>/ue-editor.md                 复制自 <仓库>/rules/ue-editor.md（IDE 可能回写文件，规则用复制）
+  <工程>/Plugins/AgentTools/AgentTools.uplugin -> <仓库>/Plugins/AgentTools/AgentTools.uplugin
+文件符号链接没有权限时退化为复制（[copy]），之后靠 --update 刷新。
 
-插件目录本身留在工程内，Binaries / Intermediate 按工程各自生成，多个工程或分支共享同一份源码互不干扰。
-之后 git pull 即可更新；uplugin 只在增减模块时变化，若安装时退化为复制，届时重跑一次安装器。
+装过的目标记在 <仓库>/installed.json（不入库）。平时 git pull 即生效；新增了安装项、
+出现过 [copy]，或 IDE 把规则链接替换成了普通文件时，跑一次 --update 即可全部修好。
+IDE 若回写规则文件（如 updatedAt），改动会落到仓库里，git status 能看到，不提交即可。
 """
 
 import os
 import sys
+import json
 import shutil
 import argparse
 import subprocess
@@ -31,6 +35,8 @@ RULE_SRC = os.path.join(REPO, 'rules', RULE_NAME)
 PLUGIN_NAME = 'AgentTools'
 PLUGIN_SRC = os.path.join(REPO, 'Plugins', PLUGIN_NAME)
 UPLUGIN = PLUGIN_NAME + '.uplugin'
+RECORD = os.path.join(REPO, 'installed.json')
+KINDS = ('skills', 'rules', 'project')
 IS_WIN = os.name == 'nt'
 
 sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')
@@ -59,6 +65,11 @@ def _remove_link(path):
         os.unlink(path)
 
 
+def _read(path):
+    with open(path, 'rb') as fp:
+        return fp.read()
+
+
 def _link_dir(dest, src):
     current = _link_target(dest)
     if current == _norm(src):
@@ -80,23 +91,23 @@ def _link_dir(dest, src):
 
 
 def _link_file(dest, src):
+    """文件用符号链接；不用硬链接，git pull 会换掉仓库文件，硬链接会静默停在旧版本。"""
     if _link_target(dest) == _norm(src):
         print('[ok]      %s' % dest)
         return
     if os.path.lexists(dest):
+        if _link_target(dest) is None and os.path.isfile(dest) and _read(dest) != _read(src):
+            # 普通文件且内容不同：可能是 IDE 回写或手改过，留一份备份再替换
+            shutil.copyfile(dest, dest + '.bak')
+            print('[backup]  %s.bak' % dest)
         os.unlink(dest)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
     try:
         os.symlink(src, dest)
         print('[link]    %s -> %s' % (dest, src))
-        return
-    except OSError:
-        pass
-    try:
-        os.link(src, dest)
-        print('[hard]    %s（硬链接；git 更新该文件后需重跑安装器）' % dest)
     except OSError:
         shutil.copyfile(src, dest)
-        print('[copy]    %s（复制；uplugin 变化后需重跑安装器）' % dest)
+        print('[copy]    %s（无符号链接权限，已复制；git pull 后跑 --update 刷新）' % dest)
 
 
 def _project_dir(path):
@@ -108,24 +119,16 @@ def _project_dir(path):
     return path
 
 
+def _dir(path):
+    return os.path.abspath(os.path.expanduser(path))
+
+
 def install_skill(skills_dir):
-    _link_dir(os.path.join(os.path.abspath(os.path.expanduser(skills_dir)), SKILL_NAME), SKILL_SRC)
-
-
-def _read(path):
-    with open(path, 'rb') as fp:
-        return fp.read()
+    _link_dir(os.path.join(_dir(skills_dir), SKILL_NAME), SKILL_SRC)
 
 
 def install_rule(rules_dir):
-    # 规则不建链接：IDE 可能回写 updatedAt 等字段，链接会改到仓库文件
-    dest = os.path.join(os.path.abspath(os.path.expanduser(rules_dir)), RULE_NAME)
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    if os.path.isfile(dest) and _read(dest) == _read(RULE_SRC):
-        print('[ok]      %s' % dest)
-        return
-    shutil.copyfile(RULE_SRC, dest)
-    print('[copy]    %s' % dest)
+    _link_file(os.path.join(_dir(rules_dir), RULE_NAME), RULE_SRC)
 
 
 def install_plugin(project):
@@ -137,24 +140,24 @@ def install_plugin(project):
     _link_file(os.path.join(plugin_dir, UPLUGIN), os.path.join(PLUGIN_SRC, UPLUGIN))
 
 
-def uninstall_rule(rules_dir):
-    dest = os.path.join(os.path.abspath(os.path.expanduser(rules_dir)), RULE_NAME)
-    if not os.path.isfile(dest):
-        print('[skip]    %s 不存在' % dest)
-    elif _read(dest) != _read(RULE_SRC):
-        print('[skip]    %s 已被修改，未删除' % dest)
-    else:
-        os.unlink(dest)
-        print('[remove]  %s' % dest)
-
-
 def uninstall_skill(skills_dir):
-    dest = os.path.join(os.path.abspath(os.path.expanduser(skills_dir)), SKILL_NAME)
+    dest = os.path.join(_dir(skills_dir), SKILL_NAME)
     if _link_target(dest) == _norm(SKILL_SRC):
         _remove_link(dest)
         print('[remove]  %s' % dest)
     elif os.path.lexists(dest):
         print('[skip]    %s 不是本仓库安装的链接' % dest)
+
+
+def uninstall_rule(rules_dir):
+    dest = os.path.join(_dir(rules_dir), RULE_NAME)
+    if not os.path.lexists(dest):
+        print('[skip]    %s 不存在' % dest)
+    elif _link_target(dest) == _norm(RULE_SRC) or (os.path.isfile(dest) and _read(dest) == _read(RULE_SRC)):
+        os.unlink(dest)
+        print('[remove]  %s' % dest)
+    else:
+        print('[skip]    %s 不是本仓库安装的规则或已被修改，未删除' % dest)
 
 
 def uninstall_plugin(project):
@@ -173,7 +176,7 @@ def uninstall_plugin(project):
         path = os.path.join(plugin_dir, name)
         if os.path.isdir(path) and _link_target(path) is None:
             shutil.rmtree(path)
-    # uplugin 可能是符号链接，也可能是安装时退化出的硬链接/复制
+    # uplugin 可能是符号链接，也可能是安装时退化出的复制（旧版还可能是硬链接）
     if os.path.lexists(uplugin) and (ours or _link_target(uplugin) == _norm(os.path.join(PLUGIN_SRC, UPLUGIN))):
         os.unlink(uplugin)
     if ours:
@@ -184,6 +187,42 @@ def uninstall_plugin(project):
         print('[remove]  %s' % plugin_dir)
     else:
         print('[warn]    %s 已移除链接，但目录内还有未删除的文件: %s' % (plugin_dir, ', '.join(left)))
+
+
+ACTIONS = {
+    'skills': (install_skill, uninstall_skill),
+    'rules': (install_rule, uninstall_rule),
+    'project': (install_plugin, uninstall_plugin),
+}
+
+
+def _load_record():
+    try:
+        with open(RECORD, 'r', encoding='utf-8') as fp:
+            data = json.load(fp)
+        return {kind: list(data.get(kind, [])) for kind in KINDS}
+    except (OSError, ValueError):
+        return {kind: [] for kind in KINDS}
+
+
+def _save_record(record):
+    with open(RECORD, 'w', encoding='utf-8') as fp:
+        json.dump(record, fp, ensure_ascii=False, indent=2)
+        fp.write('\n')
+
+
+def _record_key(kind, path):
+    path = _dir(path)
+    if kind == 'project' and path.lower().endswith('.uproject'):
+        path = os.path.dirname(path)
+    return _norm(path)
+
+
+def _git_pull():
+    r = subprocess.run(['git', '-C', REPO, 'pull', '--ff-only'], capture_output=True, text=True)
+    print((r.stdout + r.stderr).strip())
+    if r.returncode != 0:
+        raise RuntimeError('git pull 失败，先处理本地改动或冲突再重跑 --update')
 
 
 def _check_python_deps():
@@ -208,43 +247,50 @@ def _ask(prompt):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='安装 ue-editor Skill 与 AgentTools 插件（链接方式）')
+    parser = argparse.ArgumentParser(description='安装 ue-editor Skill、规则与 AgentTools 插件（链接方式）')
     parser.add_argument('--skills', action='append', default=[], help='Agent 的 Skill 目录，如 ~/.codebuddy/skills，可多次指定')
-    parser.add_argument('--rules', action='append', default=[], help='Agent 的规则目录，如 ~/.codebuddy/rules，可多次指定')
+    parser.add_argument('--rules', action='append', default=[], help='Agent 的规则目录，如 ~/.codebuddy/rules 或 <工程>/.codebuddy/rules，可多次指定')
     parser.add_argument('--project', action='append', default=[], help='UE 工程目录或 .uproject 路径，可多次指定')
-    parser.add_argument('--uninstall', action='store_true', help='移除本仓库创建的链接、规则与插件目录')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--update', action='store_true', help='git pull 后按 installed.json 复查、修复所有已安装目标')
+    mode.add_argument('--uninstall', action='store_true', help='移除本仓库创建的链接、规则与插件目录')
     args = parser.parse_args()
 
-    if not args.skills and not args.rules and not args.project:
-        args.skills = _ask('输入 Agent 的 Skill 目录')
-        args.rules = _ask('输入 Agent 的规则目录')
-        args.project = _ask('输入 UE 工程目录或 .uproject 路径')
+    record = _load_record()
+    if args.update:
+        if any(getattr(args, kind) for kind in KINDS):
+            parser.error('--update 不接受路径参数；它按 installed.json 里的记录处理')
+        _git_pull()
+        targets = record
+        if not any(targets.values()):
+            print('[warning] installed.json 里没有安装记录；先用 --skills/--rules/--project 安装一次')
+    else:
+        if not any(getattr(args, kind) for kind in KINDS):
+            args.skills = _ask('输入 Agent 的 Skill 目录')
+            args.rules = _ask('输入 Agent 的规则目录')
+            args.project = _ask('输入 UE 工程目录或 .uproject 路径')
+        targets = {kind: getattr(args, kind) for kind in KINDS}
 
     failed = False
-    for skills_dir in args.skills:
-        try:
-            (uninstall_skill if args.uninstall else install_skill)(skills_dir)
-        except Exception as e:
-            failed = True
-            print('[error]   %s' % e)
-    for rules_dir in args.rules:
-        try:
-            (uninstall_rule if args.uninstall else install_rule)(rules_dir)
-        except Exception as e:
-            failed = True
-            print('[error]   %s' % e)
-    for project in args.project:
-        try:
-            (uninstall_plugin if args.uninstall else install_plugin)(project)
-        except Exception as e:
-            failed = True
-            print('[error]   %s' % e)
+    for kind in KINDS:
+        install, uninstall = ACTIONS[kind]
+        for path in targets[kind]:
+            try:
+                (uninstall if args.uninstall else install)(path)
+                key = _record_key(kind, path)
+                record[kind] = [p for p in record[kind] if _record_key(kind, p) != key]
+                if not args.uninstall:
+                    record[kind].append(path)
+            except Exception as e:
+                failed = True
+                print('[error]   %s' % e)
+    _save_record(record)
 
     if not args.uninstall:
-        if IS_WIN and args.skills:
+        if IS_WIN and targets['skills']:
             _check_python_deps()
-        if args.project:
-            print('插件需随工程编辑器目标一起编译（打开 .uproject 时按提示重建，或用 Build.bat <工程>Editor Win64 Development）。')
+        if targets['project']:
+            print('插件源码有改动时需重新编译：编辑器开着用 Live Coding（Ctrl+Alt+F11），否则打开 .uproject 按提示重建，或用 Build.bat <工程>Editor Win64 Development。')
     return 1 if failed else 0
 
 
