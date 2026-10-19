@@ -4,8 +4,8 @@
 
 | 目录 | 内容 |
 |------|------|
-| `skills/ue-editor/` | Skill 本体：`SKILL.md`、CLI 与 Bridge 脚本、常用 Lib、接口文档 |
-| `Plugins/AgentTools/` | 配套 UE 编辑器插件（C++）：Slate 控件树读取与合成输入、Widget 蓝图读取与编辑 |
+| `skills/ue-editor/` | Skill 本体：`SKILL.md`、CLI 与 Bridge 脚本、常用 Lib、编辑器侧组合模块（`scripts/editor`）、接口文档 |
+| `Plugins/AgentTools/` | 配套 UE 编辑器插件（C++），只提供 Python 访问不到的原子能力：Slate 控件树读取与输入步骤、Widget 蓝图读写 |
 | `install.py` | 安装器：把 Skill、规则与插件链接到 Agent 目录和 UE 工程 |
 | `rules/` | 常驻规则：要求 Agent 把验证过的项目流程沉淀到工程 `.codebuddy/ue-editor/` |
 

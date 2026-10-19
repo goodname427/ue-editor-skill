@@ -26,10 +26,6 @@ public class AgentWidgetBlueprintInfoLib : ModuleRules
 				"BlueprintGraph",
 				"Kismet",
 				"MovieScene",
-				"MovieSceneTracks",
-				"AssetRegistry",
-				"Json",
-				"JsonUtilities",
 				"AgentToolsCommon",
 			}
 		);

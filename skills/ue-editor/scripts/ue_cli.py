@@ -30,11 +30,12 @@ from ue_bridge import UEBridge, DEFAULT_DISCOVER_TIMEOUT as DISCOVER_TIMEOUT
 import ue_log
 
 LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib')
-# 编辑器侧可 import 的模块（如 ue_input）；每次执行前加进 sys.path 并丢掉缓存，git pull 后无需重启编辑器
+# 编辑器侧可 import 的模块（ue_common / ue_input / ue_wbp …）；每次执行前加进 sys.path 并丢掉这些模块的缓存，git pull 后无需重启编辑器
 EDITOR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'editor')
+EDITOR_MODULES = sorted(f[:-3] for f in os.listdir(EDITOR_DIR) if f.endswith('.py'))
 PRELUDE = ('import sys\n'
            'if %r not in sys.path: sys.path.insert(0, %r)\n'
-           "sys.modules.pop('ue_input', None)\n") % (EDITOR_DIR, EDITOR_DIR)
+           'for _m in %r: sys.modules.pop(_m, None)\n') % (EDITOR_DIR, EDITOR_DIR, EDITOR_MODULES)
 
 # 控制台/管道统一按 UTF-8 输出，避免 gbk 下中文乱码或编码异常
 sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')

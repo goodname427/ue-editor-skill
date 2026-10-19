@@ -1,9 +1,11 @@
 """
-Widget 蓝图写操作：新增 / 改名 / 改属性 / 换控件 / 移除，改完自动编译保存；也可只编译保存（save）。依赖 AgentTools 的 AgentWidgetBlueprintInfoFunctionLib。
+Widget 蓝图写操作：新增 / 改名 / 改属性 / 换控件 / 移除，改完自动编译保存；也可只编译保存（save）。
+读写原子来自 AgentTools 的 AgentWidgetBlueprintInfoFunctionLib，组合在编辑器侧模块 ue_wbp（读取也直接用它，见 references/widget_blueprint_info.md）。
 
   exec --lib wbp_edit list <WBP路径>                                       控件清单：名字 | 类型 | 是否变量 | 父控件
-  exec --lib wbp_edit rename <WBP路径> <旧名> <新名>                        改控件名（自动名换成语义名）
-  exec --lib wbp_edit set <WBP路径> <控件名> <属性>=<值> [<属性>=<值> ...]   改属性，值用 UE 文本格式：bIsVariable=True、Visibility=Collapsed
+  exec --lib wbp_edit rename <WBP路径> <旧名> <新名>                        改控件名，同步变量引用、属性/动画/导航绑定
+  exec --lib wbp_edit set <WBP路径> <控件名> <属性>=<值> [<属性>=<值> ...] [--slot]   改属性（--slot 改它所在插槽），值用 UE 文本格式：
+                                                                           bIsVariable=True、Visibility=Collapsed；写后回读，解析失败直接报错
   exec --lib wbp_edit add <WBP路径> <父控件名|root> <新名> <类> [选项]       在面板下新增控件（追加到末尾，没有插入/替换 API）
   exec --lib wbp_edit replace <WBP路径> <旧控件名> <类> [选项]              同名同槽位换控件（旧实例移出到 Transient）
   exec --lib wbp_edit remove <WBP路径> <控件名>                             从父面板移除并移出 WidgetTree
@@ -25,12 +27,8 @@ Widget 蓝图写操作：新增 / 改名 / 改属性 / 换控件 / 移除，改�
 - 类写引擎/项目 UMG 类名（Button、TextBlock、MyButton）或蓝图路径（/Game/.../WBP_Foo）。
 - 改前先签出资产（如 p4 edit），只读资产保存会失败；控件查找、槽位字段与排版手法见 references/widget_blueprint_edit.md。
 """
-import json
 import unreal
-
-if getattr(unreal, 'AgentWidgetBlueprintInfoFunctionLib', None) is None:
-    raise RuntimeError('AgentWidgetBlueprintInfoFunctionLib not found: compile and enable plugin AgentTools, then restart the editor')
-LIB = unreal.AgentWidgetBlueprintInfoFunctionLib
+import ue_wbp
 
 _TRANSIENT = '/Engine/Transient'
 _ATTACH = (('canvas', 'CanvasPanel', 'add_child_to_canvas'),
@@ -58,17 +56,6 @@ def _nums(text, count, what):
 
 def _tree_path(path):
     return path + '.' + path.rsplit('/', 1)[-1] + ':WidgetTree'
-
-
-def _flat(path):
-    return json.loads(LIB.get_all_widgets_flat(path))
-
-
-def _root_name(path):
-    for item in _flat(path):
-        if str(item.get('parent') or '') in ('', 'None'):
-            return item['name']
-    raise RuntimeError('no root widget found: ' + path)
 
 
 def _load(path):
@@ -107,7 +94,7 @@ def _resolve_class(text):
 
 
 def _create(path, tree, cls_text, name):
-    if name in {item['name'] for item in _flat(path)}:
+    if name in {item['name'] for item in ue_wbp.widgets(path)}:
         raise RuntimeError('widget name already exists: ' + name)
     return unreal.new_object(_resolve_class(cls_text), tree, name)
 
@@ -239,14 +226,8 @@ def _add_text(tree, target, opts, source=None):
 
 def _set_var(path, name, value):
     """新建控件的 bIsVariable 默认值随类不同（本项目引擎里 Widget 基类是 true，Button 不覆盖，多数面板和 TextBlock 显式 false），
-    要状态确定就得显式写，写完回读确认。"""
-    result = json.loads(LIB.set_widget_property(path, name, 'bIsVariable', 'True' if value else 'False'))
-    print('var %s: %s' % (name, result.get('message')))
-    if not result.get('success'):
-        raise RuntimeError('bIsVariable failed: ' + str(result))
-    for item in _flat(path):
-        if item['name'] == name:
-            print('is_variable now: %s' % item['is_variable'])
+    要状态确定就得显式写；set_prop 写后回读。"""
+    print('var %s: bIsVariable=%s' % (name, ue_wbp.set_prop(path, name, 'bIsVariable', 'True' if value else 'False')))
 
 
 def _save(path):
@@ -269,44 +250,36 @@ def _finish(path, opts):
 
 
 def _print_slot(path, name):
-    print('slot ' + name + ': ' + json.dumps(json.loads(LIB.get_widget_slot_info(path, name)), ensure_ascii=False))
+    slot = ue_wbp.props(path, name, slot=True)
+    kind = slot.pop('__type__')
+    print('slot %s <%s>: %s' % (name, kind, '  '.join('%s=%s' % item for item in sorted(slot.items()))))
 
 
 cmd = ARGS[0] if ARGS else ''
 if cmd == 'list':
     if len(ARGS) < 2:
         _usage('list needs <WBP路径>')
-    for item in _flat(ARGS[1]):
+    for item in ue_wbp.widgets(ARGS[1]):
         print('%s | %s | var=%s | parent=%s' % (item['name'], item['type'], item['is_variable'], item['parent']))
 
 elif cmd == 'rename':
     if len(ARGS) < 4:
         _usage('rename needs <WBP路径> <旧名> <新名>')
-    result = json.loads(LIB.rename_child_widget(ARGS[1], ARGS[2], ARGS[3]))
-    print(str(result.get('message')))
-    if not result.get('success'):
-        raise RuntimeError('rename failed: ' + str(result))
+    print(ue_wbp.rename_widget(ARGS[1], ARGS[2], ARGS[3]))
     _finish(ARGS[1], OPTS)
 
 elif cmd == 'set':
     if len(ARGS) < 4:
         _usage('set needs <WBP路径> <控件名> <属性>=<值> ...')
     path, name = ARGS[1], ARGS[2]
-    failed = []
+    values = {}
     for item in ARGS[3:]:
         prop, sep, value = item.partition('=')
         if not sep or not prop:
             _usage('set values are written as <属性>=<值>')
-        result = json.loads(LIB.set_widget_property(path, name, prop, value))
-        print('%s=%s -> %s' % (prop, value, result.get('message')))
-        if not result.get('success'):
-            failed.append(prop)
-    if failed:
-        raise RuntimeError('set failed: ' + ', '.join(failed))
-    if any(item.startswith('bIsVariable=') for item in ARGS[3:]):
-        for w in _flat(path):
-            if w['name'] == name:
-                print('is_variable now: %s' % w['is_variable'])
+        values[prop] = value
+    for prop, value in values.items():
+        print('%s -> %s' % (prop, ue_wbp.set_prop(path, name, prop, value, bool(OPTS.get('slot')))))
     _finish(path, OPTS)
 
 elif cmd in ('add', 'replace'):
@@ -318,7 +291,7 @@ elif cmd in ('add', 'replace'):
     if cmd == 'add':
         parent_name = ARGS[2]
         name, cls_text = ARGS[3], ARGS[4]
-        parent = _widget(path, _root_name(path) if parent_name == 'root' else parent_name)
+        parent = _widget(path, ue_wbp.root(path) if parent_name == 'root' else parent_name)
         kind, add = _panel_kind(parent)
         if kind is None:
             raise RuntimeError('parent is not a panel widget: %s (%s)' % (parent_name, parent.get_class().get_name()))
@@ -332,7 +305,7 @@ elif cmd in ('add', 'replace'):
         kind, add = _panel_kind(parent) if parent else (None, None)
         if kind is None:
             raise RuntimeError('cannot replace root widget or a widget whose parent is not a panel: ' + old_name)
-        was_var = next(item['is_variable'] for item in _flat(path) if item['name'] == old_name)
+        was_var = ue_wbp.is_variable(path, old_name)
         name = str(OPTS.get('new_name') or old_name)
         cls_text = ARGS[3]
         data = _capture_slot(old)

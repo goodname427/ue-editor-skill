@@ -16,21 +16,12 @@ Skill 的 ui Lib 和项目脚本都 import 这里，不要在别处再拼一遍�
 ue_cli 执行完脚本后按顺序等这些结果，失败时报 InputAssertionFailed。调用方不要自己 sleep 或轮询。
 """
 import json
-import unreal
+from ue_common import parse, require
 
-LIB = getattr(unreal, 'AgentSlateDriverFunctionLib', None)
-if LIB is None:
-    raise RuntimeError('AgentSlateDriverFunctionLib not found: compile and enable plugin AgentTools, then restart the editor')
+LIB = require('AgentSlateDriverFunctionLib')
 
 MAX_HOLD = 30.0
 EDITABLE_TYPES = ('SEditableText', 'SEditableTextBox', 'SMultiLineEditableText', 'SMultiLineEditableTextBox')
-
-
-def parse(raw):
-    data = json.loads(raw)
-    if isinstance(data, dict) and (data.get('error') or data.get('success') is False):
-        raise RuntimeError(data.get('error') or data.get('message'))
-    return data
 
 
 def _queued(raw, seconds=0.0):

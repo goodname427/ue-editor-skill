@@ -1,12 +1,12 @@
 # Widget 蓝图写操作流程
 
-> 本文档收录通过脚本修改 Widget 蓝图的已验证流程。读取类接口见 [widget_blueprint_info.md](widget_blueprint_info.md)。
+> 本文档收录通过脚本修改 Widget 蓝图的已验证流程。读写组合都在编辑器侧模块 `ue_wbp`，函数一览见 [widget_blueprint_info.md](widget_blueprint_info.md)。
 > 多行脚本写成 `.py` 后用 `ue_cli.py exec --file <path>` 执行。
 
 ## 通用约定
 
 - **改前签出**：`.uasset` 在版本库里通常是独占签出，改前先签出（P4：`p4 edit -c <CL> <file>`）；只读文件 `save_asset` 会失败或弹窗。
-- **改前先读**：用 `get_all_widgets_flat(path)` 确认控件名，再按名字操作。
+- **改前先读**：用 `ue_wbp.widgets(path)`（或 `wbp_edit list`）确认控件名，再按名字操作。
 - **改后收尾**：`BlueprintEditorLibrary.compile_blueprint(bp)` → `EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)`；脚本外可直接 `ue_cli.py exec --lib wbp_edit save <路径>...`。
 - **项目收尾步骤**：工程若有依赖蓝图结构的生成步骤（如脚本层类型声明），在项目 Reference / Lib 里约定并在保存后执行，本 Skill 不内置。
 
@@ -18,6 +18,7 @@
 exec --lib wbp_edit list  /Game/UI/XXX/WBP_Foo
 exec --lib wbp_edit rename /Game/UI/XXX/WBP_Foo ScrollBox_173 ScrollView_List
 exec --lib wbp_edit set   /Game/UI/XXX/WBP_Foo ScrollView_List bIsVariable=True Visibility=Collapsed
+exec --lib wbp_edit set   /Game/UI/XXX/WBP_Foo ScrollView_List ZOrder=3 --slot              # 改它所在插槽的属性
 exec --lib wbp_edit add   /Game/UI/XXX/WBP_Foo CanvasPanel_Root Btn_Confirm Button --text=确定 --copy=Btn_Cancel --anchor=0,0,0,0 --offset=100,200,160,48 --align=0.5,0.5
 exec --lib wbp_edit replace /Game/UI/XXX/WBP_Foo BP_Child /Game/UI/XXX/WBP_Child2   # 默认沿用旧控件的槽位与变量状态
 exec --lib wbp_edit remove /Game/UI/XXX/WBP_Foo Btn_Confirm
@@ -42,13 +43,13 @@ panel = unreal.find_object(None, P + '.' + N + ':WidgetTree.CanvasPanel_Root')
 ## 改名并勾选"是变量"
 
 ```python
-lib = unreal.AgentWidgetBlueprintInfoFunctionLib
-print(lib.rename_child_widget(P, 'ScrollBox_173', 'ScrollView_List'))
-print(lib.set_widget_property(P, 'ScrollView_List', 'bIsVariable', 'True'))
+import ue_wbp
+print(ue_wbp.rename_widget(P, 'ScrollBox_173', 'ScrollView_List'))
+print(ue_wbp.set_prop(P, 'ScrollView_List', 'bIsVariable', 'True'))     # 返回回读值 'True'
 ```
 
-- `set_widget_property` 的值按 UE 文本格式给（`True`、`Collapsed`），属性名是 C++ 属性名；批量设置用 `set_widget_properties`。
-- 该接口不检查 `ImportText` 是否真的写进去，改完用 `get_all_widgets_flat` 的 `is_variable` 或 `get_widget_detail_info` 回读。
+- 改名同步变量引用、属性/动画/导航绑定；新名字与控件树里任何控件重名、含空格、以数字开头时直接报错。不要用 Python 的 `widget.rename(...)` 改控件名：它不同步这些引用，撞名时引擎会直接 fatal。
+- `set_prop` 的值按 UE 文本格式给（`True`、`Collapsed`），属性名是 C++ 属性名；写后回读，解析失败报错。批量用 `ue_wbp.set_props(P, name, {...})`，插槽属性加 `slot=True`。
 
 ## 新增控件
 
@@ -62,13 +63,13 @@ layout.anchors = unreal.Anchors(minimum=unreal.Vector2D(0, 0), maximum=unreal.Ve
 layout.offsets = unreal.Margin(0, 150, 1000, 600)
 layout.alignment = unreal.Vector2D(0, 0)
 slot.set_layout(layout)
-lib.set_widget_property(P, 'Btn_Confirm', 'bIsVariable', 'True')
+ue_wbp.set_prop(P, 'Btn_Confirm', 'bIsVariable', 'True')
 ```
 
 - 子蓝图实例：类用 `unreal.EditorAssetLibrary.load_blueprint_class('/Game/.../WBP_Child')` 或 `unreal.load_class(None, '/Game/.../WBP_Child.WBP_Child_C')`。
 - 样式可从同树已有控件复制：`new.set_editor_property('widget_style', old.get_editor_property('widget_style'))`；文字控件复制 `font`；ComboBoxString 还要 `item_style` / `scroll_bar_style` / `content_padding` / `foreground_color` / `max_list_height`。
 - 没有 insert/replace API，新控件只能追加到父面板末尾；按钮等 Content 控件用 `add_child` 挂文字子控件。
-- 回读槽位用 `get_widget_slot_info(path, name)`；CanvasPanel 槽位在 Python 侧读 `slot.get_layout()`，横/纵/Overlay 槽位读 `padding` / `size` / `horizontal_alignment` / `vertical_alignment`。
+- 回读槽位用 `ue_wbp.props(P, name, slot=True)`（如 `LayoutData`、`ZOrder`、`Padding`）；也可以在 Python 侧读 `slot.get_layout()`，横/纵/Overlay 槽位读 `padding` / `size` / `horizontal_alignment` / `vertical_alignment`。
 
 ## 删除或替换控件
 

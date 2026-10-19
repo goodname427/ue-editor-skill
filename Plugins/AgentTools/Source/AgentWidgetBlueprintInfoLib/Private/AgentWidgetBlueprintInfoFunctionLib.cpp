@@ -2,1724 +2,662 @@
 
 #include "AgentWidgetBlueprintInfoFunctionLib.h"
 
-#include "WidgetBlueprint.h"
-#include "Blueprint/UserWidget.h"
-#include "Blueprint/WidgetTree.h"
-#include "Blueprint/WidgetBlueprintGeneratedClass.h"
-#include "Components/Widget.h"
-#include "Components/PanelWidget.h"
-#include "Components/PanelSlot.h"
-#include "Components/CanvasPanelSlot.h"
-#include "Components/HorizontalBoxSlot.h"
-#include "Components/VerticalBoxSlot.h"
-#include "Components/OverlaySlot.h"
-#include "Components/GridSlot.h"
-#include "Components/SizeBox.h"
-#include "Components/NamedSlot.h"
+#include "AgentJson.h"
 #include "Animation/WidgetAnimation.h"
-#include "AssetRegistry/AssetRegistryModule.h"
-#include "Engine/Blueprint.h"
+#include "Blueprint/WidgetNavigation.h"
+#include "Blueprint/WidgetTree.h"
+#include "Components/PanelSlot.h"
+#include "Components/PanelWidget.h"
+#include "Components/Widget.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraphSchema_K2.h"
-#include "K2Node_FunctionEntry.h"
 #include "K2Node_Event.h"
-#include "K2Node_CustomEvent.h"
-#include "MovieScene.h"
-#include "Tracks/MovieScenePropertyTrack.h"
+#include "K2Node_FunctionEntry.h"
+#include "K2Node_FunctionResult.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "K2Node_EditablePinBase.h"
-#include "Dom/JsonObject.h"
-#include "Serialization/JsonReader.h"
-#include "Serialization/JsonSerializer.h"
-#include "AgentJson.h"
+#include "Kismet2/Kismet2NameValidators.h"
+#include "MovieScene.h"
+#include "MovieScenePossessable.h"
+#include "WidgetBlueprint.h"
 
-UWidgetBlueprint* UAgentWidgetBlueprintInfoFunctionLib::LoadWidgetBlueprint(const FString& AssetPath)
+// ==================== 公共辅助 ====================
+
+static FString WBPFail(const FString& Message)
+{
+	return AgentJson::Object({AgentJson::PairBool(TEXT("success"), false), AgentJson::Pair(TEXT("message"), Message)});
+}
+
+static FString WBPOk(const FString& Message, TArray<FString> Fields = TArray<FString>())
+{
+	Fields.Insert(AgentJson::Pair(TEXT("message"), Message), 0);
+	Fields.Insert(AgentJson::PairBool(TEXT("success"), true), 0);
+	return AgentJson::Object(Fields);
+}
+
+static UWidgetBlueprint* WBPLoad(const FString& AssetPath, FString& OutError)
 {
 	FString FullPath = AssetPath;
-	// 如果路径不包含类型后缀，自动补全
 	if (!FullPath.Contains(TEXT(".")))
 	{
-		FString AssetName = FPackageName::GetShortName(FullPath);
-		FullPath = FullPath + TEXT(".") + AssetName;
+		FullPath += TEXT(".") + FPackageName::GetShortName(FullPath);
 	}
-	UObject* Asset = StaticLoadObject(UWidgetBlueprint::StaticClass(), nullptr, *FullPath);
-	return Cast<UWidgetBlueprint>(Asset);
-}
-
-UWidget* UAgentWidgetBlueprintInfoFunctionLib::FindWidgetInTree(UWidgetBlueprint* WidgetBP, const FString& WidgetName)
-{
+	UWidgetBlueprint* WidgetBP = Cast<UWidgetBlueprint>(StaticLoadObject(UWidgetBlueprint::StaticClass(), nullptr, *FullPath));
 	if (!WidgetBP || !WidgetBP->WidgetTree)
 	{
+		OutError = FString::Printf(TEXT("Not a WidgetBlueprint: %s"), *AssetPath);
 		return nullptr;
 	}
-	return WidgetBP->WidgetTree->FindWidget(FName(*WidgetName));
+	return WidgetBP;
 }
 
-// ==================== Widget蓝图基础信息 ====================
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetWidgetBlueprintInfo(const FString& AssetPath)
+static UWidget* WBPFindWidget(UWidgetBlueprint* WidgetBP, const FString& WidgetName, FString& OutError)
 {
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("{\"error\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-	UClass* GenClass = WidgetBP->GeneratedClass;
-	FString ParentClassName = GenClass && GenClass->GetSuperClass() ? GenClass->GetSuperClass()->GetName() : TEXT("None");
-	FString BlueprintName = WidgetBP->GetName();
-	FString BlueprintPath = WidgetBP->GetPathName();
-
-	int32 WidgetCount = 0;
-	if (WidgetBP->WidgetTree)
-	{
-		TArray<UWidget*> AllWidgets;
-		WidgetBP->WidgetTree->GetAllWidgets(AllWidgets);
-		WidgetCount = AllWidgets.Num();
-	}
-
-	int32 AnimCount = 0;
-#if WITH_EDITORONLY_DATA
-	AnimCount = WidgetBP->Animations.Num();
-#endif
-
-	int32 BindingCount = 0;
-#if WITH_EDITORONLY_DATA
-	BindingCount = WidgetBP->Bindings.Num();
-#endif
-
-	int32 FuncCount = WidgetBP->FunctionGraphs.Num();
-
-	TArray<FString> Pairs;
-	Pairs.Add(AgentJson::Pair(TEXT("name"), BlueprintName));
-	Pairs.Add(AgentJson::Pair(TEXT("path"), BlueprintPath));
-	Pairs.Add(AgentJson::Pair(TEXT("parent_class"), ParentClassName));
-	Pairs.Add(AgentJson::PairInt(TEXT("widget_count"), WidgetCount));
-	Pairs.Add(AgentJson::PairInt(TEXT("animation_count"), AnimCount));
-	Pairs.Add(AgentJson::PairInt(TEXT("binding_count"), BindingCount));
-	Pairs.Add(AgentJson::PairInt(TEXT("function_count"), FuncCount));
-
-	FString RootWidgetType = TEXT("None");
-	if (WidgetBP->WidgetTree && WidgetBP->WidgetTree->RootWidget)
-	{
-		RootWidgetType = WidgetBP->WidgetTree->RootWidget->GetClass()->GetName();
-	}
-	Pairs.Add(AgentJson::Pair(TEXT("root_widget_type"), RootWidgetType));
-
-	return AgentJson::Object(Pairs);
-}
-
-// ==================== WidgetTree 层级结构 ====================
-
-FString UAgentWidgetBlueprintInfoFunctionLib::BuildWidgetTreeJson(UWidget* Widget, UWidgetTree* WidgetTree)
-{
+	UWidget* Widget = WidgetBP->WidgetTree->FindWidget(FName(*WidgetName));
 	if (!Widget)
 	{
-		return TEXT("null");
+		OutError = FString::Printf(TEXT("Widget not found in WidgetTree: %s"), *WidgetName);
 	}
-
-	TArray<FString> Pairs;
-	Pairs.Add(AgentJson::Pair(TEXT("name"), Widget->GetName()));
-	Pairs.Add(AgentJson::Pair(TEXT("type"), Widget->GetClass()->GetName()));
-	Pairs.Add(AgentJson::Pair(TEXT("visibility"), UEnum::GetValueAsString(Widget->GetVisibility())));
-	Pairs.Add(AgentJson::PairBool(TEXT("is_variable"), Widget->bIsVariable));
-
-	UPanelWidget* PanelWidget = Cast<UPanelWidget>(Widget);
-	if (PanelWidget)
-	{
-		TArray<FString> ChildrenJson;
-		for (int32 i = 0; i < PanelWidget->GetChildrenCount(); ++i)
-		{
-			UWidget* Child = PanelWidget->GetChildAt(i);
-			if (Child)
-			{
-				ChildrenJson.Add(BuildWidgetTreeJson(Child, WidgetTree));
-			}
-		}
-		Pairs.Add(AgentJson::PairRaw(TEXT("children"), AgentJson::Array(ChildrenJson)));
-	}
-
-	return AgentJson::Object(Pairs);
+	return Widget;
 }
 
-FString UAgentWidgetBlueprintInfoFunctionLib::GetWidgetTreeHierarchy(const FString& AssetPath)
+static UEdGraph* WBPFindFunction(UWidgetBlueprint* WidgetBP, const FString& FunctionName, FString& OutError)
 {
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP || !WidgetBP->WidgetTree)
-	{
-		return TEXT("{\"error\":\"Failed to load WidgetBlueprint or WidgetTree is null\"}");
-	}
-
-	UWidget* RootWidget = WidgetBP->WidgetTree->RootWidget;
-	return BuildWidgetTreeJson(RootWidget, WidgetBP->WidgetTree);
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetAllWidgetsFlat(const FString& AssetPath)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP || !WidgetBP->WidgetTree)
-	{
-		return TEXT("[]");
-	}
-
-	TArray<UWidget*> AllWidgets;
-	WidgetBP->WidgetTree->GetAllWidgets(AllWidgets);
-
-	TArray<FString> Items;
-	for (UWidget* Widget : AllWidgets)
-	{
-		if (!Widget) continue;
-
-		TArray<FString> Pairs;
-		Pairs.Add(AgentJson::Pair(TEXT("name"), Widget->GetName()));
-		Pairs.Add(AgentJson::Pair(TEXT("type"), Widget->GetClass()->GetName()));
-		Pairs.Add(AgentJson::PairBool(TEXT("is_variable"), Widget->bIsVariable));
-		Pairs.Add(AgentJson::Pair(TEXT("visibility"), UEnum::GetValueAsString(Widget->GetVisibility())));
-
-		// 获取父Widget名称
-		int32 ChildIndex = INDEX_NONE;
-		UPanelWidget* Parent = UWidgetTree::FindWidgetParent(Widget, ChildIndex);
-		Pairs.Add(AgentJson::Pair(TEXT("parent"), Parent ? Parent->GetName() : TEXT("")));
-		Pairs.Add(AgentJson::PairInt(TEXT("child_index"), ChildIndex));
-
-		Items.Add(AgentJson::Object(Pairs));
-	}
-
-	return AgentJson::Array(Items);
-}
-
-// ==================== 单个Widget详细信息 ====================
-
-FString UAgentWidgetBlueprintInfoFunctionLib::WidgetToJsonObject(UWidget* Widget, bool bDetailed)
-{
-	if (!Widget)
-	{
-		return TEXT("null");
-	}
-
-	TArray<FString> Pairs;
-	Pairs.Add(AgentJson::Pair(TEXT("name"), Widget->GetName()));
-	Pairs.Add(AgentJson::Pair(TEXT("type"), Widget->GetClass()->GetName()));
-	Pairs.Add(AgentJson::Pair(TEXT("visibility"), UEnum::GetValueAsString(Widget->GetVisibility())));
-	Pairs.Add(AgentJson::PairBool(TEXT("is_variable"), Widget->bIsVariable));
-	Pairs.Add(AgentJson::PairBool(TEXT("is_enabled"), Widget->GetIsEnabled()));
-
-	// RenderTransform
-	FWidgetTransform Transform = Widget->GetRenderTransform();
-	FString TransformJson = FString::Printf(
-		TEXT("{\"translation\":[%.2f,%.2f],\"scale\":[%.2f,%.2f],\"shear\":[%.2f,%.2f],\"angle\":%.2f}"),
-		Transform.Translation.X, Transform.Translation.Y,
-		Transform.Scale.X, Transform.Scale.Y,
-		Transform.Shear.X, Transform.Shear.Y,
-		Transform.Angle
-	);
-	Pairs.Add(AgentJson::PairRaw(TEXT("render_transform"), TransformJson));
-	Pairs.Add(AgentJson::PairFloat(TEXT("render_opacity"), Widget->GetRenderOpacity()));
-
-	// ToolTipText
-	Pairs.Add(AgentJson::Pair(TEXT("tool_tip_text"), Widget->GetToolTipText().ToString()));
-
-	if (bDetailed)
-	{
-		// 列出该Widget类的所有UPROPERTY
-		TArray<FString> PropItems;
-		for (TFieldIterator<FProperty> PropIt(Widget->GetClass()); PropIt; ++PropIt)
-		{
-			FProperty* Prop = *PropIt;
-			if (!Prop->HasAnyPropertyFlags(CPF_Edit | CPF_BlueprintVisible))
-			{
-				continue;
-			}
-
-			FString PropValue;
-			const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Widget);
-			Prop->ExportTextItem_Direct(PropValue, ValuePtr, nullptr, Widget, PPF_None);
-
-			TArray<FString> PropPairs;
-			PropPairs.Add(AgentJson::Pair(TEXT("name"), Prop->GetName()));
-			PropPairs.Add(AgentJson::Pair(TEXT("type"), Prop->GetCPPType()));
-			PropPairs.Add(AgentJson::Pair(TEXT("value"), PropValue));
-			PropItems.Add(AgentJson::Object(PropPairs));
-		}
-		Pairs.Add(AgentJson::PairRaw(TEXT("properties"), AgentJson::Array(PropItems)));
-	}
-
-	// Slot信息
-	Pairs.Add(AgentJson::PairRaw(TEXT("slot"), GetSlotInfoJson(Widget)));
-
-	// 子Widget数量（如果是PanelWidget）
-	UPanelWidget* PanelWidget = Cast<UPanelWidget>(Widget);
-	if (PanelWidget)
-	{
-		Pairs.Add(AgentJson::PairInt(TEXT("children_count"), PanelWidget->GetChildrenCount()));
-	}
-
-	return AgentJson::Object(Pairs);
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetWidgetDetailInfo(const FString& AssetPath, const FString& WidgetName)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("{\"error\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-	UWidget* Widget = FindWidgetInTree(WidgetBP, WidgetName);
-	if (!Widget)
-	{
-		return TEXT("{\"error\":\"Widget not found in WidgetTree\"}");
-	}
-
-	return WidgetToJsonObject(Widget, true);
-}
-
-// ==================== Slot信息 ====================
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetSlotInfoJson(UWidget* Widget)
-{
-	if (!Widget || !Widget->Slot)
-	{
-		return TEXT("null");
-	}
-
-	UPanelSlot* Slot = Widget->Slot;
-	TArray<FString> Pairs;
-	Pairs.Add(AgentJson::Pair(TEXT("slot_type"), Slot->GetClass()->GetName()));
-
-	// CanvasPanelSlot
-	if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(Slot))
-	{
-		FAnchorData LayoutData = CanvasSlot->GetLayout();
-		FAnchors Anchors = LayoutData.Anchors;
-
-		Pairs.Add(AgentJson::PairRaw(TEXT("anchors"), FString::Printf(
-			TEXT("{\"minimum\":[%.4f,%.4f],\"maximum\":[%.4f,%.4f]}"),
-			Anchors.Minimum.X, Anchors.Minimum.Y,
-			Anchors.Maximum.X, Anchors.Maximum.Y
-		)));
-		Pairs.Add(AgentJson::PairRaw(TEXT("offset"), FString::Printf(
-			TEXT("{\"left\":%.2f,\"top\":%.2f,\"right\":%.2f,\"bottom\":%.2f}"),
-			LayoutData.Offsets.Left, LayoutData.Offsets.Top,
-			LayoutData.Offsets.Right, LayoutData.Offsets.Bottom
-		)));
-		Pairs.Add(AgentJson::PairRaw(TEXT("alignment"), FString::Printf(
-			TEXT("[%.4f,%.4f]"),
-			LayoutData.Alignment.X, LayoutData.Alignment.Y
-		)));
-		Pairs.Add(AgentJson::PairBool(TEXT("auto_size"), CanvasSlot->GetAutoSize()));
-		Pairs.Add(AgentJson::PairInt(TEXT("z_order"), CanvasSlot->GetZOrder()));
-	}
-
-	// HorizontalBoxSlot
-	if (UHorizontalBoxSlot* HBoxSlot = Cast<UHorizontalBoxSlot>(Slot))
-	{
-		Pairs.Add(AgentJson::PairRaw(TEXT("padding"), FString::Printf(
-			TEXT("{\"left\":%.2f,\"top\":%.2f,\"right\":%.2f,\"bottom\":%.2f}"),
-			HBoxSlot->GetPadding().Left, HBoxSlot->GetPadding().Top,
-			HBoxSlot->GetPadding().Right, HBoxSlot->GetPadding().Bottom
-		)));
-		Pairs.Add(AgentJson::PairRaw(TEXT("size"), FString::Printf(
-			TEXT("{\"size_rule\":\"%s\",\"value\":%.4f}"),
-			*UEnum::GetValueAsString(HBoxSlot->GetSize().SizeRule),
-			HBoxSlot->GetSize().Value
-		)));
-		Pairs.Add(AgentJson::Pair(TEXT("horizontal_alignment"), UEnum::GetValueAsString(HBoxSlot->GetHorizontalAlignment())));
-		Pairs.Add(AgentJson::Pair(TEXT("vertical_alignment"), UEnum::GetValueAsString(HBoxSlot->GetVerticalAlignment())));
-	}
-
-	// VerticalBoxSlot
-	if (UVerticalBoxSlot* VBoxSlot = Cast<UVerticalBoxSlot>(Slot))
-	{
-		Pairs.Add(AgentJson::PairRaw(TEXT("padding"), FString::Printf(
-			TEXT("{\"left\":%.2f,\"top\":%.2f,\"right\":%.2f,\"bottom\":%.2f}"),
-			VBoxSlot->GetPadding().Left, VBoxSlot->GetPadding().Top,
-			VBoxSlot->GetPadding().Right, VBoxSlot->GetPadding().Bottom
-		)));
-		Pairs.Add(AgentJson::PairRaw(TEXT("size"), FString::Printf(
-			TEXT("{\"size_rule\":\"%s\",\"value\":%.4f}"),
-			*UEnum::GetValueAsString(VBoxSlot->GetSize().SizeRule),
-			VBoxSlot->GetSize().Value
-		)));
-		Pairs.Add(AgentJson::Pair(TEXT("horizontal_alignment"), UEnum::GetValueAsString(VBoxSlot->GetHorizontalAlignment())));
-		Pairs.Add(AgentJson::Pair(TEXT("vertical_alignment"), UEnum::GetValueAsString(VBoxSlot->GetVerticalAlignment())));
-	}
-
-	// OverlaySlot
-	if (UOverlaySlot* OvSlot = Cast<UOverlaySlot>(Slot))
-	{
-		Pairs.Add(AgentJson::PairRaw(TEXT("padding"), FString::Printf(
-			TEXT("{\"left\":%.2f,\"top\":%.2f,\"right\":%.2f,\"bottom\":%.2f}"),
-			OvSlot->GetPadding().Left, OvSlot->GetPadding().Top,
-			OvSlot->GetPadding().Right, OvSlot->GetPadding().Bottom
-		)));
-		Pairs.Add(AgentJson::Pair(TEXT("horizontal_alignment"), UEnum::GetValueAsString(OvSlot->GetHorizontalAlignment())));
-		Pairs.Add(AgentJson::Pair(TEXT("vertical_alignment"), UEnum::GetValueAsString(OvSlot->GetVerticalAlignment())));
-	}
-
-	return AgentJson::Object(Pairs);
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetWidgetSlotInfo(const FString& AssetPath, const FString& WidgetName)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("{\"error\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-	UWidget* Widget = FindWidgetInTree(WidgetBP, WidgetName);
-	if (!Widget)
-	{
-		return TEXT("{\"error\":\"Widget not found in WidgetTree\"}");
-	}
-
-	return GetSlotInfoJson(Widget);
-}
-
-// ==================== 变量与属性 ====================
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetBlueprintVariables(const FString& AssetPath)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("[]");
-	}
-
-	TArray<FString> Items;
-	for (const FBPVariableDescription& Var : WidgetBP->NewVariables)
-	{
-		TArray<FString> Pairs;
-		Pairs.Add(AgentJson::Pair(TEXT("name"), Var.VarName.ToString()));
-		Pairs.Add(AgentJson::Pair(TEXT("type"), Var.VarType.PinCategory.ToString()));
-
-		FString SubType;
-		if (Var.VarType.PinSubCategoryObject.IsValid())
-		{
-			SubType = Var.VarType.PinSubCategoryObject->GetName();
-		}
-		else
-		{
-			SubType = Var.VarType.PinSubCategory.ToString();
-		}
-		Pairs.Add(AgentJson::Pair(TEXT("sub_type"), SubType));
-		Pairs.Add(AgentJson::PairBool(TEXT("is_array"), Var.VarType.IsArray()));
-		Pairs.Add(AgentJson::PairBool(TEXT("is_set"), Var.VarType.IsSet()));
-		Pairs.Add(AgentJson::PairBool(TEXT("is_map"), Var.VarType.IsMap()));
-		Pairs.Add(AgentJson::PairBool(TEXT("instance_editable"), Var.PropertyFlags & CPF_Edit ? true : false));
-		Pairs.Add(AgentJson::PairBool(TEXT("blueprint_read_only"), Var.PropertyFlags & CPF_BlueprintReadOnly ? true : false));
-		Pairs.Add(AgentJson::Pair(TEXT("category"), Var.Category.ToString()));
-
-		// 默认值
-		Pairs.Add(AgentJson::Pair(TEXT("default_value"), Var.DefaultValue));
-
-		Items.Add(AgentJson::Object(Pairs));
-	}
-
-	return AgentJson::Array(Items);
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetWidgetVariables(const FString& AssetPath)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP || !WidgetBP->WidgetTree)
-	{
-		return TEXT("[]");
-	}
-
-	TArray<FString> Items;
-	TArray<UWidget*> AllWidgets;
-	WidgetBP->WidgetTree->GetAllWidgets(AllWidgets);
-
-	for (UWidget* Widget : AllWidgets)
-	{
-		if (!Widget || !Widget->bIsVariable)
-		{
-			continue;
-		}
-
-		TArray<FString> Pairs;
-		Pairs.Add(AgentJson::Pair(TEXT("name"), Widget->GetName()));
-		Pairs.Add(AgentJson::Pair(TEXT("type"), Widget->GetClass()->GetName()));
-
-		Items.Add(AgentJson::Object(Pairs));
-	}
-
-	return AgentJson::Array(Items);
-}
-
-// ==================== 动画信息 ====================
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetWidgetAnimations(const FString& AssetPath)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("[]");
-	}
-
-	TArray<FString> Items;
-
-#if WITH_EDITORONLY_DATA
-	for (UWidgetAnimation* Anim : WidgetBP->Animations)
-	{
-		if (!Anim) continue;
-
-		TArray<FString> Pairs;
-		Pairs.Add(AgentJson::Pair(TEXT("name"), Anim->GetName()));
-
-		UMovieScene* MovieScene = Anim->GetMovieScene();
-		if (MovieScene)
-		{
-			FFrameRate TickResolution = MovieScene->GetTickResolution();
-			FFrameRate DisplayRate = MovieScene->GetDisplayRate();
-			FFrameNumber StartFrame = MovieScene->GetPlaybackRange().GetLowerBoundValue();
-			FFrameNumber EndFrame = MovieScene->GetPlaybackRange().GetUpperBoundValue();
-			float Duration = TickResolution.AsSeconds(FFrameTime(EndFrame - StartFrame));
-
-			Pairs.Add(AgentJson::PairFloat(TEXT("duration"), Duration));
-			Pairs.Add(AgentJson::PairInt(TEXT("track_count"), MovieScene->GetTracks().Num() + MovieScene->GetBindings().Num()));
-		}
-
-		Items.Add(AgentJson::Object(Pairs));
-	}
-#endif
-
-	return AgentJson::Array(Items);
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetWidgetAnimationDetail(const FString& AssetPath, const FString& AnimationName)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("{\"error\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-#if WITH_EDITORONLY_DATA
-	UWidgetAnimation* TargetAnim = nullptr;
-	for (UWidgetAnimation* Anim : WidgetBP->Animations)
-	{
-		if (Anim && Anim->GetName() == AnimationName)
-		{
-			TargetAnim = Anim;
-			break;
-		}
-	}
-
-	if (!TargetAnim)
-	{
-		return TEXT("{\"error\":\"Animation not found\"}");
-	}
-
-	TArray<FString> Pairs;
-	Pairs.Add(AgentJson::Pair(TEXT("name"), TargetAnim->GetName()));
-
-	UMovieScene* MovieScene = TargetAnim->GetMovieScene();
-	if (MovieScene)
-	{
-		FFrameRate TickResolution = MovieScene->GetTickResolution();
-		FFrameNumber StartFrame = MovieScene->GetPlaybackRange().GetLowerBoundValue();
-		FFrameNumber EndFrame = MovieScene->GetPlaybackRange().GetUpperBoundValue();
-		float Duration = TickResolution.AsSeconds(FFrameTime(EndFrame - StartFrame));
-		Pairs.Add(AgentJson::PairFloat(TEXT("duration"), Duration));
-
-		// 绑定的对象
-		TArray<FString> BindingItems;
-		for (const FMovieSceneBinding& Binding : MovieScene->GetBindings())
-		{
-			TArray<FString> BindPairs;
-			BindPairs.Add(AgentJson::Pair(TEXT("name"), Binding.GetName()));
-
-			TArray<FString> TrackItems;
-			for (UMovieSceneTrack* Track : Binding.GetTracks())
-			{
-				if (!Track) continue;
-				TArray<FString> TrackPairs;
-				TrackPairs.Add(AgentJson::Pair(TEXT("track_name"), Track->GetTrackName().ToString()));
-				TrackPairs.Add(AgentJson::Pair(TEXT("track_type"), Track->GetClass()->GetName()));
-				TrackItems.Add(AgentJson::Object(TrackPairs));
-			}
-			BindPairs.Add(AgentJson::PairRaw(TEXT("tracks"), AgentJson::Array(TrackItems)));
-
-			BindingItems.Add(AgentJson::Object(BindPairs));
-		}
-		Pairs.Add(AgentJson::PairRaw(TEXT("bindings"), AgentJson::Array(BindingItems)));
-	}
-
-	return AgentJson::Object(Pairs);
-#else
-	return TEXT("{\"error\":\"Editor only data not available\"}");
-#endif
-}
-
-// ==================== 函数与事件 ====================
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetBlueprintFunctions(const FString& AssetPath)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("[]");
-	}
-
-	TArray<FString> Items;
 	for (UEdGraph* Graph : WidgetBP->FunctionGraphs)
 	{
-		if (!Graph) continue;
-
-		TArray<FString> Pairs;
-		Pairs.Add(AgentJson::Pair(TEXT("name"), Graph->GetName()));
-
-		// 获取函数入口节点的参数信息
-		TArray<FString> ParamItems;
-		TArray<FString> ReturnItems;
-		for (UEdGraphNode* Node : Graph->Nodes)
-		{
-			UK2Node_FunctionEntry* EntryNode = Cast<UK2Node_FunctionEntry>(Node);
-			if (!EntryNode) continue;
-
-			for (UEdGraphPin* Pin : EntryNode->Pins)
-			{
-				if (!Pin || Pin->Direction != EGPD_Output) continue;
-				if (Pin->PinName == UEdGraphSchema_K2::PN_Then) continue;
-
-				TArray<FString> PinPairs;
-				PinPairs.Add(AgentJson::Pair(TEXT("name"), Pin->PinName.ToString()));
-				PinPairs.Add(AgentJson::Pair(TEXT("type"), Pin->PinType.PinCategory.ToString()));
-				if (Pin->PinType.PinSubCategoryObject.IsValid())
-				{
-					PinPairs.Add(AgentJson::Pair(TEXT("sub_type"), Pin->PinType.PinSubCategoryObject->GetName()));
-				}
-				ParamItems.Add(AgentJson::Object(PinPairs));
-			}
-		}
-		Pairs.Add(AgentJson::PairRaw(TEXT("parameters"), AgentJson::Array(ParamItems)));
-
-		// 获取返回值（通过FunctionResult节点）
-		for (UEdGraphNode* Node : Graph->Nodes)
-		{
-			if (Node->GetClass()->GetName().Contains(TEXT("FunctionResult")))
-			{
-				for (UEdGraphPin* Pin : Node->Pins)
-				{
-					if (!Pin || Pin->Direction != EGPD_Input) continue;
-					if (Pin->PinName == UEdGraphSchema_K2::PN_Execute) continue;
-
-					TArray<FString> PinPairs;
-					PinPairs.Add(AgentJson::Pair(TEXT("name"), Pin->PinName.ToString()));
-					PinPairs.Add(AgentJson::Pair(TEXT("type"), Pin->PinType.PinCategory.ToString()));
-					if (Pin->PinType.PinSubCategoryObject.IsValid())
-					{
-						PinPairs.Add(AgentJson::Pair(TEXT("sub_type"), Pin->PinType.PinSubCategoryObject->GetName()));
-					}
-					ReturnItems.Add(AgentJson::Object(PinPairs));
-				}
-			}
-		}
-		Pairs.Add(AgentJson::PairRaw(TEXT("return_values"), AgentJson::Array(ReturnItems)));
-
-		Items.Add(AgentJson::Object(Pairs));
-	}
-
-	return AgentJson::Array(Items);
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetBlueprintEvents(const FString& AssetPath)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("[]");
-	}
-
-	TArray<FString> Items;
-
-	// 遍历EventGraphs
-	for (UEdGraph* Graph : WidgetBP->UbergraphPages)
-	{
-		if (!Graph) continue;
-
-		for (UEdGraphNode* Node : Graph->Nodes)
-		{
-			// 自定义事件
-			UK2Node_CustomEvent* CustomEvent = Cast<UK2Node_CustomEvent>(Node);
-			if (CustomEvent)
-			{
-				TArray<FString> Pairs;
-				Pairs.Add(AgentJson::Pair(TEXT("name"), CustomEvent->CustomFunctionName.ToString()));
-				Pairs.Add(AgentJson::Pair(TEXT("type"), TEXT("CustomEvent")));
-				Pairs.Add(AgentJson::Pair(TEXT("graph"), Graph->GetName()));
-				Items.Add(AgentJson::Object(Pairs));
-				continue;
-			}
-
-			// 引擎事件（如Construct、Tick等）
-			UK2Node_Event* EventNode = Cast<UK2Node_Event>(Node);
-			if (EventNode)
-			{
-				TArray<FString> Pairs;
-				Pairs.Add(AgentJson::Pair(TEXT("name"), EventNode->GetFunctionName().ToString()));
-				Pairs.Add(AgentJson::Pair(TEXT("type"), TEXT("EngineEvent")));
-				Pairs.Add(AgentJson::Pair(TEXT("graph"), Graph->GetName()));
-				Items.Add(AgentJson::Object(Pairs));
-			}
-		}
-	}
-
-	return AgentJson::Array(Items);
-}
-
-// ==================== 属性绑定 ====================
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetPropertyBindings(const FString& AssetPath)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("[]");
-	}
-
-	TArray<FString> Items;
-
-#if WITH_EDITORONLY_DATA
-	for (const FDelegateEditorBinding& Binding : WidgetBP->Bindings)
-	{
-		TArray<FString> Pairs;
-		Pairs.Add(AgentJson::Pair(TEXT("widget_name"), Binding.ObjectName));
-		Pairs.Add(AgentJson::Pair(TEXT("property_name"), Binding.PropertyName.ToString()));
-		Pairs.Add(AgentJson::Pair(TEXT("function_name"), Binding.FunctionName.ToString()));
-		Pairs.Add(AgentJson::Pair(TEXT("source_property"), Binding.SourceProperty.ToString()));
-		Pairs.Add(AgentJson::Pair(TEXT("kind"), UEnum::GetValueAsString(Binding.Kind)));
-
-		Items.Add(AgentJson::Object(Pairs));
-	}
-#endif
-
-	return AgentJson::Array(Items);
-}
-
-// ==================== NamedSlot ====================
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetNamedSlots(const FString& AssetPath)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP || !WidgetBP->WidgetTree)
-	{
-		return TEXT("[]");
-	}
-
-	TArray<FString> Items;
-
-	// 从WidgetTree中查找所有NamedSlot Widget
-	TArray<UWidget*> AllWidgets;
-	WidgetBP->WidgetTree->GetAllWidgets(AllWidgets);
-
-	for (UWidget* Widget : AllWidgets)
-	{
-		UNamedSlot* NamedSlotWidget = Cast<UNamedSlot>(Widget);
-		if (!NamedSlotWidget) continue;
-
-		TArray<FString> Pairs;
-		Pairs.Add(AgentJson::Pair(TEXT("name"), NamedSlotWidget->GetName()));
-
-		// 获取Slot中的内容
-		if (NamedSlotWidget->GetChildrenCount() > 0)
-		{
-			UWidget* Content = NamedSlotWidget->GetChildAt(0);
-			if (Content)
-			{
-				Pairs.Add(AgentJson::Pair(TEXT("content_name"), Content->GetName()));
-				Pairs.Add(AgentJson::Pair(TEXT("content_type"), Content->GetClass()->GetName()));
-			}
-		}
-		else
-		{
-			Pairs.Add(AgentJson::Pair(TEXT("content_name"), TEXT("")));
-			Pairs.Add(AgentJson::Pair(TEXT("content_type"), TEXT("")));
-		}
-
-		Items.Add(AgentJson::Object(Pairs));
-	}
-
-	// 也包含WidgetTree的NamedSlotBindings
-	for (const auto& SlotBinding : WidgetBP->WidgetTree->NamedSlotBindings)
-	{
-		TArray<FString> Pairs;
-		Pairs.Add(AgentJson::Pair(TEXT("name"), SlotBinding.Key.ToString()));
-		Pairs.Add(AgentJson::Pair(TEXT("source"), TEXT("NamedSlotBinding")));
-		if (SlotBinding.Value)
-		{
-			Pairs.Add(AgentJson::Pair(TEXT("content_name"), SlotBinding.Value->GetName()));
-			Pairs.Add(AgentJson::Pair(TEXT("content_type"), SlotBinding.Value->GetClass()->GetName()));
-		}
-		Items.Add(AgentJson::Object(Pairs));
-	}
-
-	return AgentJson::Array(Items);
-}
-
-// ==================== 批量查询 ====================
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetAllWidgetBlueprintsInDirectory(const FString& DirectoryPath, bool bRecursive)
-{
-	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
-
-	FARFilter Filter;
-	Filter.ClassPaths.Add(UWidgetBlueprint::StaticClass()->GetClassPathName());
-	Filter.bRecursiveClasses = true;
-	Filter.PackagePaths.Add(*DirectoryPath);
-	Filter.bRecursivePaths = bRecursive;
-
-	TArray<FAssetData> AssetList;
-	AssetRegistry.GetAssets(Filter, AssetList);
-
-	TArray<FString> Items;
-	for (const FAssetData& Asset : AssetList)
-	{
-		TArray<FString> Pairs;
-		Pairs.Add(AgentJson::Pair(TEXT("name"), Asset.AssetName.ToString()));
-		Pairs.Add(AgentJson::Pair(TEXT("path"), Asset.GetObjectPathString()));
-		Pairs.Add(AgentJson::Pair(TEXT("package_path"), Asset.PackagePath.ToString()));
-		Items.Add(AgentJson::Object(Pairs));
-	}
-
-	return AgentJson::Array(Items);
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetWidgetBlueprintInheritanceChain(const FString& AssetPath)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP || !WidgetBP->GeneratedClass)
-	{
-		return TEXT("[]");
-	}
-
-	TArray<FString> Items;
-	UClass* CurrentClass = WidgetBP->GeneratedClass;
-	while (CurrentClass)
-	{
-		TArray<FString> Pairs;
-		Pairs.Add(AgentJson::Pair(TEXT("name"), CurrentClass->GetName()));
-		Pairs.Add(AgentJson::Pair(TEXT("path"), CurrentClass->GetPathName()));
-		Pairs.Add(AgentJson::PairBool(TEXT("is_blueprint"), CurrentClass->ClassGeneratedBy != nullptr));
-		Items.Add(AgentJson::Object(Pairs));
-
-		if (CurrentClass == UUserWidget::StaticClass())
-		{
-			break;
-		}
-		CurrentClass = CurrentClass->GetSuperClass();
-	}
-
-	return AgentJson::Array(Items);
-}
-
-// ==================== 蓝图图表与节点 ====================
-
-UEdGraph* UAgentWidgetBlueprintInfoFunctionLib::FindGraphByName(UWidgetBlueprint* WidgetBP, const FString& GraphName)
-{
-	if (!WidgetBP)
-	{
-		return nullptr;
-	}
-
-	TArray<UEdGraph*> AllGraphs;
-	WidgetBP->GetAllGraphs(AllGraphs);
-	for (UEdGraph* Graph : AllGraphs)
-	{
-		if (Graph && Graph->GetName() == GraphName)
+		if (Graph && Graph->GetName() == FunctionName)
 		{
 			return Graph;
 		}
 	}
+	OutError = FString::Printf(TEXT("Function not found: %s"), *FunctionName);
 	return nullptr;
 }
 
-FString UAgentWidgetBlueprintInfoFunctionLib::PinToJson(UEdGraphPin* Pin, bool bIncludeLinks)
+static UK2Node_FunctionEntry* WBPFindEntry(UEdGraph* Graph)
 {
-	if (!Pin)
+	TArray<UK2Node_FunctionEntry*> Entries;
+	Graph->GetNodesOfClass(Entries);
+	return Entries.Num() > 0 ? Entries[0] : nullptr;
+}
+
+static UK2Node_FunctionResult* WBPFindResult(UEdGraph* Graph)
+{
+	TArray<UK2Node_FunctionResult*> Results;
+	Graph->GetNodesOfClass(Results);
+	return Results.Num() > 0 ? Results[0] : nullptr;
+}
+
+static FString WBPPinTypeJson(const FEdGraphPinType& PinType, TArray<FString> Fields = TArray<FString>())
+{
+	Fields.Add(AgentJson::Pair(TEXT("type"), PinType.PinCategory.ToString()));
+	if (PinType.IsContainer())
 	{
-		return TEXT("null");
+		Fields.Add(AgentJson::Pair(TEXT("container"), PinType.IsArray() ? TEXT("array") : PinType.IsSet() ? TEXT("set") : TEXT("map")));
 	}
-
-	TArray<FString> Pairs;
-	Pairs.Add(AgentJson::Pair(TEXT("name"), Pin->PinName.ToString()));
-	Pairs.Add(AgentJson::Pair(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("Input") : TEXT("Output")));
-	Pairs.Add(AgentJson::Pair(TEXT("type"), Pin->PinType.PinCategory.ToString()));
-
-	if (Pin->PinType.PinSubCategoryObject.IsValid())
+	if (PinType.PinSubCategoryObject.IsValid())
 	{
-		Pairs.Add(AgentJson::Pair(TEXT("sub_type"), Pin->PinType.PinSubCategoryObject->GetName()));
+		Fields.Add(AgentJson::Pair(TEXT("sub_type"), PinType.PinSubCategoryObject->GetName()));
 	}
+	else if (!PinType.PinSubCategory.IsNone())
+	{
+		Fields.Add(AgentJson::Pair(TEXT("sub_type"), PinType.PinSubCategory.ToString()));
+	}
+	return AgentJson::Object(Fields);
+}
 
-	Pairs.Add(AgentJson::PairBool(TEXT("is_array"), Pin->PinType.IsArray()));
-	Pairs.Add(AgentJson::PairBool(TEXT("is_reference"), Pin->PinType.bIsReference));
-	Pairs.Add(AgentJson::PairBool(TEXT("is_hidden"), Pin->bHidden));
+// 函数参数：入口节点的输出引脚（去掉执行引脚）或结果节点的输入引脚
+static FString WBPParamsJson(UEdGraphNode* Node, EEdGraphPinDirection Direction)
+{
+	TArray<FString> Items;
+	if (Node)
+	{
+		for (UEdGraphPin* Pin : Node->Pins)
+		{
+			if (Pin && Pin->Direction == Direction && Pin->PinType.PinCategory != UEdGraphSchema_K2::PC_Exec)
+			{
+				Items.Add(WBPPinTypeJson(Pin->PinType, {AgentJson::Pair(TEXT("name"), Pin->PinName.ToString())}));
+			}
+		}
+	}
+	return AgentJson::Array(Items);
+}
 
+static FString WBPPropertiesJson(UObject* Target)
+{
+	TArray<FString> Items;
+	for (TFieldIterator<FProperty> It(Target->GetClass()); It; ++It)
+	{
+		FProperty* Prop = *It;
+		if (!Prop->HasAnyPropertyFlags(CPF_Edit | CPF_BlueprintVisible))
+		{
+			continue;
+		}
+		FString Value;
+		Prop->ExportTextItem_Direct(Value, Prop->ContainerPtrToValuePtr<void>(Target), nullptr, Target, PPF_None);
+		Items.Add(AgentJson::Object({AgentJson::Pair(TEXT("name"), Prop->GetName()), AgentJson::Pair(TEXT("type"), Prop->GetCPPType()), AgentJson::Pair(TEXT("value"), Value)}));
+	}
+	return AgentJson::Array(Items);
+}
+
+static FString WBPPinJson(UEdGraphPin* Pin)
+{
+	TArray<FString> Fields;
+	Fields.Add(AgentJson::Pair(TEXT("name"), Pin->PinName.ToString()));
+	Fields.Add(AgentJson::Pair(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("Input") : TEXT("Output")));
+	Fields.Add(AgentJson::PairBool(TEXT("is_array"), Pin->PinType.IsArray()));
+	Fields.Add(AgentJson::PairBool(TEXT("is_reference"), Pin->PinType.bIsReference));
+	Fields.Add(AgentJson::PairBool(TEXT("is_hidden"), Pin->bHidden));
 	if (!Pin->DefaultValue.IsEmpty())
 	{
-		Pairs.Add(AgentJson::Pair(TEXT("default_value"), Pin->DefaultValue));
+		Fields.Add(AgentJson::Pair(TEXT("default_value"), Pin->DefaultValue));
 	}
 	if (!Pin->DefaultTextValue.IsEmpty())
 	{
-		Pairs.Add(AgentJson::Pair(TEXT("default_text_value"), Pin->DefaultTextValue.ToString()));
+		Fields.Add(AgentJson::Pair(TEXT("default_text_value"), Pin->DefaultTextValue.ToString()));
 	}
-
-	if (bIncludeLinks)
+	TArray<FString> Links;
+	for (UEdGraphPin* Linked : Pin->LinkedTo)
 	{
-		TArray<FString> LinkItems;
-		for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+		if (Linked && Linked->GetOwningNode())
 		{
-			if (!LinkedPin || !LinkedPin->GetOwningNode()) continue;
-
-			TArray<FString> LinkPairs;
-			LinkPairs.Add(AgentJson::Pair(TEXT("node_name"), LinkedPin->GetOwningNode()->GetNodeTitle(ENodeTitleType::ListView).ToString()));
-			LinkPairs.Add(AgentJson::Pair(TEXT("node_guid"), LinkedPin->GetOwningNode()->NodeGuid.ToString()));
-			LinkPairs.Add(AgentJson::Pair(TEXT("pin_name"), LinkedPin->PinName.ToString()));
-			LinkItems.Add(AgentJson::Object(LinkPairs));
+			Links.Add(AgentJson::Object({
+				AgentJson::Pair(TEXT("node_name"), Linked->GetOwningNode()->GetNodeTitle(ENodeTitleType::ListView).ToString()),
+				AgentJson::Pair(TEXT("node_guid"), Linked->GetOwningNode()->NodeGuid.ToString()),
+				AgentJson::Pair(TEXT("pin_name"), Linked->PinName.ToString())}));
 		}
-		Pairs.Add(AgentJson::PairRaw(TEXT("links"), AgentJson::Array(LinkItems)));
 	}
-
-	return AgentJson::Object(Pairs);
+	Fields.Add(AgentJson::PairRaw(TEXT("links"), AgentJson::Array(Links)));
+	return WBPPinTypeJson(Pin->PinType, Fields);
 }
 
-FString UAgentWidgetBlueprintInfoFunctionLib::NodeToJson(UEdGraphNode* Node, bool bDetailed)
+static FString WBPNodeJson(UEdGraphNode* Node, bool bDetailed)
 {
-	if (!Node)
-	{
-		return TEXT("null");
-	}
-
-	TArray<FString> Pairs;
-	Pairs.Add(AgentJson::Pair(TEXT("node_class"), Node->GetClass()->GetName()));
-	Pairs.Add(AgentJson::Pair(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString()));
-	Pairs.Add(AgentJson::Pair(TEXT("compact_title"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString()));
-	Pairs.Add(AgentJson::Pair(TEXT("guid"), Node->NodeGuid.ToString()));
-	Pairs.Add(AgentJson::PairInt(TEXT("pos_x"), Node->NodePosX));
-	Pairs.Add(AgentJson::PairInt(TEXT("pos_y"), Node->NodePosY));
-	Pairs.Add(AgentJson::PairBool(TEXT("enabled"), Node->IsNodeEnabled()));
-
+	TArray<FString> Fields;
+	Fields.Add(AgentJson::Pair(TEXT("node_class"), Node->GetClass()->GetName()));
+	Fields.Add(AgentJson::Pair(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString()));
+	Fields.Add(AgentJson::Pair(TEXT("compact_title"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString()));
+	Fields.Add(AgentJson::Pair(TEXT("guid"), Node->NodeGuid.ToString()));
+	Fields.Add(AgentJson::PairInt(TEXT("pos_x"), Node->NodePosX));
+	Fields.Add(AgentJson::PairInt(TEXT("pos_y"), Node->NodePosY));
+	Fields.Add(AgentJson::PairBool(TEXT("enabled"), Node->IsNodeEnabled()));
 	if (!Node->NodeComment.IsEmpty())
 	{
-		Pairs.Add(AgentJson::Pair(TEXT("comment"), Node->NodeComment));
+		Fields.Add(AgentJson::Pair(TEXT("comment"), Node->NodeComment));
 	}
-
+	// 事件节点的标题是显示名，事件名要单独给（自定义事件即 CustomFunctionName）
+	if (const UK2Node_Event* Event = Cast<UK2Node_Event>(Node))
+	{
+		Fields.Add(AgentJson::Pair(TEXT("function_name"), Event->GetFunctionName().ToString()));
+	}
 	if (bDetailed)
 	{
-		TArray<FString> PinItems;
+		TArray<FString> Pins;
 		for (UEdGraphPin* Pin : Node->Pins)
 		{
-			if (!Pin) continue;
-			PinItems.Add(PinToJson(Pin, true));
+			if (Pin)
+			{
+				Pins.Add(WBPPinJson(Pin));
+			}
 		}
-		Pairs.Add(AgentJson::PairRaw(TEXT("pins"), AgentJson::Array(PinItems)));
+		Fields.Add(AgentJson::PairRaw(TEXT("pins"), AgentJson::Array(Pins)));
 	}
 	else
 	{
-		// 简略模式只列出非Exec引脚的名称和方向
-		int32 InputCount = 0;
-		int32 OutputCount = 0;
+		int32 Inputs = 0;
+		int32 Outputs = 0;
 		for (UEdGraphPin* Pin : Node->Pins)
 		{
-			if (!Pin || Pin->bHidden) continue;
-			if (Pin->Direction == EGPD_Input) InputCount++;
-			else OutputCount++;
+			if (Pin && !Pin->bHidden)
+			{
+				(Pin->Direction == EGPD_Input ? Inputs : Outputs)++;
+			}
 		}
-		Pairs.Add(AgentJson::PairInt(TEXT("input_pin_count"), InputCount));
-		Pairs.Add(AgentJson::PairInt(TEXT("output_pin_count"), OutputCount));
+		Fields.Add(AgentJson::PairInt(TEXT("input_pin_count"), Inputs));
+		Fields.Add(AgentJson::PairInt(TEXT("output_pin_count"), Outputs));
 	}
-
-	return AgentJson::Object(Pairs);
+	return AgentJson::Object(Fields);
 }
 
-static FString GetGraphTypeString(UWidgetBlueprint* WidgetBP, UEdGraph* Graph)
+static FString WBPGraphType(UWidgetBlueprint* WidgetBP, UEdGraph* Graph)
 {
-	for (UEdGraph* G : WidgetBP->FunctionGraphs)
+	if (WidgetBP->FunctionGraphs.Contains(Graph))
 	{
-		if (G == Graph) return TEXT("Function");
+		return TEXT("Function");
 	}
-	for (UEdGraph* G : WidgetBP->UbergraphPages)
+	if (WidgetBP->UbergraphPages.Contains(Graph))
 	{
-		if (G == Graph) return TEXT("EventGraph");
+		return TEXT("EventGraph");
 	}
-	for (UEdGraph* G : WidgetBP->MacroGraphs)
+	if (WidgetBP->MacroGraphs.Contains(Graph))
 	{
-		if (G == Graph) return TEXT("Macro");
+		return TEXT("Macro");
 	}
-	for (UEdGraph* G : WidgetBP->DelegateSignatureGraphs)
+	if (WidgetBP->DelegateSignatureGraphs.Contains(Graph))
 	{
-		if (G == Graph) return TEXT("DelegateSignature");
+		return TEXT("DelegateSignature");
 	}
 	return TEXT("Other");
 }
 
-FString UAgentWidgetBlueprintInfoFunctionLib::GetAllGraphs(const FString& AssetPath)
+// ==================== 读取 ====================
+
+FString UAgentWidgetBlueprintInfoFunctionLib::GetWidgets(const FString& AssetPath)
 {
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
+	FString Error;
+	UWidgetBlueprint* WidgetBP = WBPLoad(AssetPath, Error);
 	if (!WidgetBP)
 	{
-		return TEXT("[]");
+		return WBPFail(Error);
 	}
-
-	TArray<UEdGraph*> AllGraphs;
-	WidgetBP->GetAllGraphs(AllGraphs);
-
+	TArray<UWidget*> Widgets;
+	WidgetBP->WidgetTree->GetAllWidgets(Widgets);
 	TArray<FString> Items;
-	for (UEdGraph* Graph : AllGraphs)
+	for (UWidget* Widget : Widgets)
 	{
-		if (!Graph) continue;
-
-		TArray<FString> Pairs;
-		Pairs.Add(AgentJson::Pair(TEXT("name"), Graph->GetName()));
-		Pairs.Add(AgentJson::Pair(TEXT("type"), GetGraphTypeString(WidgetBP, Graph)));
-		Pairs.Add(AgentJson::PairInt(TEXT("node_count"), Graph->Nodes.Num()));
-
-		Items.Add(AgentJson::Object(Pairs));
-	}
-
-	return AgentJson::Array(Items);
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetGraphNodes(const FString& AssetPath, const FString& GraphName)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("{\"error\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-	UEdGraph* Graph = FindGraphByName(WidgetBP, GraphName);
-	if (!Graph)
-	{
-		return TEXT("{\"error\":\"Graph not found\"}");
-	}
-
-	TArray<FString> Items;
-	for (UEdGraphNode* Node : Graph->Nodes)
-	{
-		if (!Node) continue;
-		Items.Add(NodeToJson(Node, false));
-	}
-
-	return AgentJson::Array(Items);
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetNodeDetail(const FString& AssetPath, const FString& GraphName, const FString& NodeGuid)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("{\"error\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-	UEdGraph* Graph = FindGraphByName(WidgetBP, GraphName);
-	if (!Graph)
-	{
-		return TEXT("{\"error\":\"Graph not found\"}");
-	}
-
-	FGuid TargetGuid;
-	if (!FGuid::Parse(NodeGuid, TargetGuid))
-	{
-		return TEXT("{\"error\":\"Invalid GUID format\"}");
-	}
-
-	for (UEdGraphNode* Node : Graph->Nodes)
-	{
-		if (Node && Node->NodeGuid == TargetGuid)
+		if (!Widget)
 		{
-			return NodeToJson(Node, true);
+			continue;
+		}
+		int32 ChildIndex = INDEX_NONE;
+		const UPanelWidget* Parent = UWidgetTree::FindWidgetParent(Widget, ChildIndex);
+		Items.Add(AgentJson::Object({
+			AgentJson::Pair(TEXT("name"), Widget->GetName()),
+			AgentJson::Pair(TEXT("type"), Widget->GetClass()->GetName()),
+			AgentJson::PairBool(TEXT("is_variable"), Widget->bIsVariable),
+			AgentJson::Pair(TEXT("visibility"), UEnum::GetValueAsString(Widget->GetVisibility())),
+			AgentJson::Pair(TEXT("parent"), Parent ? Parent->GetName() : FString()),
+			AgentJson::PairInt(TEXT("child_index"), ChildIndex)}));
+	}
+	return AgentJson::Array(Items);
+}
+
+FString UAgentWidgetBlueprintInfoFunctionLib::GetWidgetProperties(const FString& AssetPath, const FString& WidgetName, bool bSlot)
+{
+	FString Error;
+	UWidgetBlueprint* WidgetBP = WBPLoad(AssetPath, Error);
+	UWidget* Widget = WidgetBP ? WBPFindWidget(WidgetBP, WidgetName, Error) : nullptr;
+	if (!Widget)
+	{
+		return WBPFail(Error);
+	}
+	UObject* Target = bSlot ? static_cast<UObject*>(Widget->Slot) : Widget;
+	if (!Target)
+	{
+		return WBPFail(FString::Printf(TEXT("Widget has no slot (it is the root): %s"), *WidgetName));
+	}
+	return AgentJson::Object({
+		AgentJson::Pair(TEXT("name"), WidgetName),
+		AgentJson::Pair(TEXT("type"), Target->GetClass()->GetName()),
+		AgentJson::PairRaw(TEXT("properties"), WBPPropertiesJson(Target))});
+}
+
+FString UAgentWidgetBlueprintInfoFunctionLib::GetBlueprintVariables(const FString& AssetPath)
+{
+	FString Error;
+	UWidgetBlueprint* WidgetBP = WBPLoad(AssetPath, Error);
+	if (!WidgetBP)
+	{
+		return WBPFail(Error);
+	}
+	TArray<FString> Items;
+	for (const FBPVariableDescription& Var : WidgetBP->NewVariables)
+	{
+		Items.Add(WBPPinTypeJson(Var.VarType, {
+			AgentJson::Pair(TEXT("name"), Var.VarName.ToString()),
+			AgentJson::PairBool(TEXT("is_array"), Var.VarType.IsArray()),
+			AgentJson::PairBool(TEXT("is_set"), Var.VarType.IsSet()),
+			AgentJson::PairBool(TEXT("is_map"), Var.VarType.IsMap()),
+			AgentJson::PairBool(TEXT("instance_editable"), (Var.PropertyFlags & CPF_DisableEditOnInstance) == 0 && (Var.PropertyFlags & CPF_Edit) != 0),
+			AgentJson::PairBool(TEXT("blueprint_read_only"), (Var.PropertyFlags & CPF_BlueprintReadOnly) != 0),
+			AgentJson::Pair(TEXT("category"), Var.Category.ToString()),
+			AgentJson::Pair(TEXT("default_value"), Var.DefaultValue)}));
+	}
+	return AgentJson::Array(Items);
+}
+
+static FString WBPTracksJson(const TArray<UMovieSceneTrack*>& Tracks)
+{
+	TArray<FString> Items;
+	for (const UMovieSceneTrack* Track : Tracks)
+	{
+		if (Track)
+		{
+			Items.Add(AgentJson::Object({AgentJson::Pair(TEXT("track_name"), Track->GetTrackName().ToString()), AgentJson::Pair(TEXT("track_type"), Track->GetClass()->GetName())}));
 		}
 	}
-
-	return TEXT("{\"error\":\"Node not found\"}");
+	return AgentJson::Array(Items);
 }
 
-// ==================== ChildWidget 重命名 ====================
+FString UAgentWidgetBlueprintInfoFunctionLib::GetWidgetAnimations(const FString& AssetPath)
+{
+	FString Error;
+	UWidgetBlueprint* WidgetBP = WBPLoad(AssetPath, Error);
+	if (!WidgetBP)
+	{
+		return WBPFail(Error);
+	}
+	TArray<FString> Items;
+	for (UWidgetAnimation* Anim : WidgetBP->Animations)
+	{
+		UMovieScene* Scene = Anim ? Anim->GetMovieScene() : nullptr;
+		if (!Scene)
+		{
+			continue;
+		}
+		const TRange<FFrameNumber> Range = Scene->GetPlaybackRange();
+		const double Duration = Scene->GetTickResolution().AsSeconds(FFrameTime(Range.GetUpperBoundValue() - Range.GetLowerBoundValue()));
+		// 动画绑定到控件靠 AnimationBindings.WidgetName（改名时会同步），MovieScene 绑定名只是显示用
+		TArray<FString> Bindings;
+		for (const FWidgetAnimationBinding& AnimBinding : Anim->AnimationBindings)
+		{
+			const FMovieSceneBinding* Binding = Scene->FindBinding(AnimBinding.AnimationGuid);
+			Bindings.Add(AgentJson::Object({
+				AgentJson::Pair(TEXT("widget_name"), AnimBinding.WidgetName.ToString()),
+				AgentJson::Pair(TEXT("slot_widget_name"), AnimBinding.SlotWidgetName.IsNone() ? FString() : AnimBinding.SlotWidgetName.ToString()),
+				AgentJson::Pair(TEXT("name"), Binding ? Binding->GetName() : FString()),
+				AgentJson::PairRaw(TEXT("tracks"), Binding ? WBPTracksJson(Binding->GetTracks()) : TEXT("[]"))}));
+		}
+		Items.Add(AgentJson::Object({
+			AgentJson::Pair(TEXT("name"), Anim->GetName()),
+			AgentJson::PairFloat(TEXT("duration"), static_cast<float>(Duration)),
+			AgentJson::PairRaw(TEXT("bindings"), AgentJson::Array(Bindings)),
+			AgentJson::PairRaw(TEXT("master_tracks"), WBPTracksJson(Scene->GetTracks()))}));
+	}
+	return AgentJson::Array(Items);
+}
+
+FString UAgentWidgetBlueprintInfoFunctionLib::GetPropertyBindings(const FString& AssetPath)
+{
+	FString Error;
+	UWidgetBlueprint* WidgetBP = WBPLoad(AssetPath, Error);
+	if (!WidgetBP)
+	{
+		return WBPFail(Error);
+	}
+	TArray<FString> Items;
+	for (const FDelegateEditorBinding& Binding : WidgetBP->Bindings)
+	{
+		Items.Add(AgentJson::Object({
+			AgentJson::Pair(TEXT("widget_name"), Binding.ObjectName),
+			AgentJson::Pair(TEXT("property_name"), Binding.PropertyName.ToString()),
+			AgentJson::Pair(TEXT("function_name"), Binding.FunctionName.ToString()),
+			AgentJson::Pair(TEXT("source_property"), Binding.SourceProperty.ToString()),
+			AgentJson::Pair(TEXT("kind"), UEnum::GetValueAsString(Binding.Kind))}));
+	}
+	return AgentJson::Array(Items);
+}
+
+FString UAgentWidgetBlueprintInfoFunctionLib::GetNamedSlotBindings(const FString& AssetPath)
+{
+	FString Error;
+	UWidgetBlueprint* WidgetBP = WBPLoad(AssetPath, Error);
+	if (!WidgetBP)
+	{
+		return WBPFail(Error);
+	}
+	TArray<FString> Items;
+	for (const TPair<FName, TObjectPtr<UWidget>>& Binding : WidgetBP->WidgetTree->NamedSlotBindings)
+	{
+		const UWidget* Content = Binding.Value;
+		Items.Add(AgentJson::Object({
+			AgentJson::Pair(TEXT("name"), Binding.Key.ToString()),
+			AgentJson::Pair(TEXT("content_name"), Content ? Content->GetName() : FString()),
+			AgentJson::Pair(TEXT("content_type"), Content ? Content->GetClass()->GetName() : FString())}));
+	}
+	return AgentJson::Array(Items);
+}
+
+FString UAgentWidgetBlueprintInfoFunctionLib::GetAllGraphs(const FString& AssetPath)
+{
+	FString Error;
+	UWidgetBlueprint* WidgetBP = WBPLoad(AssetPath, Error);
+	if (!WidgetBP)
+	{
+		return WBPFail(Error);
+	}
+	TArray<UEdGraph*> Graphs;
+	WidgetBP->GetAllGraphs(Graphs);
+	TArray<FString> Items;
+	for (UEdGraph* Graph : Graphs)
+	{
+		if (Graph)
+		{
+			Items.Add(AgentJson::Object({
+				AgentJson::Pair(TEXT("name"), Graph->GetName()),
+				AgentJson::Pair(TEXT("type"), WBPGraphType(WidgetBP, Graph)),
+				AgentJson::PairInt(TEXT("node_count"), Graph->Nodes.Num())}));
+		}
+	}
+	return AgentJson::Array(Items);
+}
+
+FString UAgentWidgetBlueprintInfoFunctionLib::GetGraphNodes(const FString& AssetPath, const FString& GraphName, bool bDetailed)
+{
+	FString Error;
+	UWidgetBlueprint* WidgetBP = WBPLoad(AssetPath, Error);
+	if (!WidgetBP)
+	{
+		return WBPFail(Error);
+	}
+	TArray<UEdGraph*> Graphs;
+	WidgetBP->GetAllGraphs(Graphs);
+	UEdGraph* const* Found = Graphs.FindByPredicate([&](const UEdGraph* Graph) { return Graph && Graph->GetName() == GraphName; });
+	if (!Found)
+	{
+		return WBPFail(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+	}
+	TArray<FString> Items;
+	for (UEdGraphNode* Node : (*Found)->Nodes)
+	{
+		if (Node)
+		{
+			Items.Add(WBPNodeJson(Node, bDetailed));
+		}
+	}
+	return AgentJson::Array(Items);
+}
+
+FString UAgentWidgetBlueprintInfoFunctionLib::GetBlueprintFunctions(const FString& AssetPath)
+{
+	FString Error;
+	UWidgetBlueprint* WidgetBP = WBPLoad(AssetPath, Error);
+	if (!WidgetBP)
+	{
+		return WBPFail(Error);
+	}
+	TArray<FString> Items;
+	for (UEdGraph* Graph : WidgetBP->FunctionGraphs)
+	{
+		if (!Graph)
+		{
+			continue;
+		}
+		UK2Node_FunctionEntry* Entry = WBPFindEntry(Graph);
+		Items.Add(AgentJson::Object({
+			AgentJson::Pair(TEXT("name"), Graph->GetName()),
+			AgentJson::Pair(TEXT("description"), Entry ? Entry->MetaData.ToolTip.ToString() : FString()),
+			AgentJson::PairInt(TEXT("node_count"), Graph->Nodes.Num()),
+			AgentJson::PairRaw(TEXT("inputs"), WBPParamsJson(Entry, EGPD_Output)),
+			AgentJson::PairRaw(TEXT("outputs"), WBPParamsJson(WBPFindResult(Graph), EGPD_Input))}));
+	}
+	return AgentJson::Array(Items);
+}
+
+// ==================== 写入 ====================
 
 FString UAgentWidgetBlueprintInfoFunctionLib::RenameChildWidget(const FString& AssetPath, const FString& OldWidgetName, const FString& NewWidgetName)
 {
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP || !WidgetBP->WidgetTree)
-	{
-		return TEXT("{\"success\":false,\"message\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-	UWidget* Widget = FindWidgetInTree(WidgetBP, OldWidgetName);
+	FString Error;
+	UWidgetBlueprint* WidgetBP = WBPLoad(AssetPath, Error);
+	UWidget* Widget = WidgetBP ? WBPFindWidget(WidgetBP, OldWidgetName, Error) : nullptr;
 	if (!Widget)
 	{
-		return TEXT("{\"success\":false,\"message\":\"Widget not found in WidgetTree\"}");
+		return WBPFail(Error);
 	}
-
-	if (FindWidgetInTree(WidgetBP, NewWidgetName))
+	const FName OldName(*OldWidgetName);
+	const FName NewName(*NewWidgetName);
+	// 名字校验器只管变量、函数等成员名，不管 WidgetTree 里没勾"是变量"的控件；撞上同名对象时 Rename 会直接 fatal，所以先自己查
+	if (NewWidgetName.IsEmpty() || !FName::IsValidXName(NewWidgetName, INVALID_OBJECTNAME_CHARACTERS TEXT(" ")) || FChar::IsDigit(NewWidgetName[0]))
 	{
-		return FString::Printf(TEXT("{\"success\":false,\"message\":\"Widget name '%s' already exists\"}"), *AgentJson::EscapeString(NewWidgetName));
+		return WBPFail(FString::Printf(TEXT("Invalid widget name '%s': use letters, digits and _, not starting with a digit"), *NewWidgetName));
+	}
+	if (WidgetBP->WidgetTree->FindWidget(NewName) || !Widget->Rename(*NewWidgetName, nullptr, REN_Test))
+	{
+		return WBPFail(FString::Printf(TEXT("Name already used in WidgetTree: %s"), *NewWidgetName));
+	}
+	// 与设计器同一套校验：不与其它控件变量、成员变量、函数重名，名字本身合法
+	FKismetNameValidator Validator(WidgetBP, OldName);
+	const EValidatorResult Valid = Validator.IsValid(NewName);
+	if (Valid != EValidatorResult::Ok)
+	{
+		return WBPFail(FString::Printf(TEXT("Invalid new name '%s': %s"), *NewWidgetName, *INameValidatorInterface::GetErrorString(NewWidgetName, Valid)));
 	}
 
+	// 以下与 FWidgetBlueprintEditorUtils::RenameWidget 一致，只是不依赖打开的蓝图编辑器（没有预览控件要同步）
+	WidgetBP->Modify();
+	Widget->Modify();
+	Widget->SetDisplayLabel(NewWidgetName);
 	Widget->Rename(*NewWidgetName, nullptr, REN_DontCreateRedirectors);
-	WidgetBP->MarkPackageDirty();
-
-	return FString::Printf(TEXT("{\"success\":true,\"message\":\"Renamed '%s' to '%s'\"}"),
-		*AgentJson::EscapeString(OldWidgetName), *AgentJson::EscapeString(NewWidgetName));
+	FBlueprintEditorUtils::ReplaceVariableReferences(WidgetBP, OldName, NewName);
+	for (FDelegateEditorBinding& Binding : WidgetBP->Bindings)
+	{
+		if (Binding.ObjectName == OldWidgetName)
+		{
+			Binding.ObjectName = NewWidgetName;
+		}
+	}
+	for (UWidgetAnimation* Anim : WidgetBP->Animations)
+	{
+		if (!Anim)
+		{
+			continue;
+		}
+		for (FWidgetAnimationBinding& AnimBinding : Anim->AnimationBindings)
+		{
+			if (AnimBinding.WidgetName != OldName)
+			{
+				continue;
+			}
+			AnimBinding.WidgetName = NewName;
+			Anim->MovieScene->Modify();
+			if (AnimBinding.SlotWidgetName == NAME_None)
+			{
+				if (FMovieScenePossessable* Possessable = Anim->MovieScene->FindPossessable(AnimBinding.AnimationGuid))
+				{
+					Possessable->SetName(NewWidgetName);
+				}
+			}
+		}
+	}
+	WidgetBP->WidgetTree->ForEachWidget([&](UWidget* Each)
+	{
+		if (Each->Navigation)
+		{
+			Each->Navigation->SetFlags(RF_Transactional);
+			Each->Navigation->Modify();
+			Each->Navigation->TryToRenameBinding(OldName, NewName);
+		}
+	});
+	FBlueprintEditorUtils::ValidateBlueprintChildVariables(WidgetBP, NewName);
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
+	return WBPOk(FString::Printf(TEXT("Renamed '%s' to '%s'"), *OldWidgetName, *NewWidgetName));
 }
 
-// ==================== ChildWidget 属性编辑 ====================
-
-FString UAgentWidgetBlueprintInfoFunctionLib::SetWidgetProperty(const FString& AssetPath, const FString& WidgetName, const FString& PropertyName, const FString& PropertyValue)
+FString UAgentWidgetBlueprintInfoFunctionLib::SetWidgetProperty(const FString& AssetPath, const FString& WidgetName, const FString& PropertyName, const FString& PropertyValue, bool bSlot)
 {
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP || !WidgetBP->WidgetTree)
-	{
-		return TEXT("{\"success\":false,\"message\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-	UWidget* Widget = FindWidgetInTree(WidgetBP, WidgetName);
+	FString Error;
+	UWidgetBlueprint* WidgetBP = WBPLoad(AssetPath, Error);
+	UWidget* Widget = WidgetBP ? WBPFindWidget(WidgetBP, WidgetName, Error) : nullptr;
 	if (!Widget)
 	{
-		return TEXT("{\"success\":false,\"message\":\"Widget not found in WidgetTree\"}");
+		return WBPFail(Error);
 	}
-
-	FProperty* Prop = FindFProperty<FProperty>(Widget->GetClass(), *PropertyName);
+	UObject* Target = bSlot ? static_cast<UObject*>(Widget->Slot) : Widget;
+	if (!Target)
+	{
+		return WBPFail(FString::Printf(TEXT("Widget has no slot (it is the root): %s"), *WidgetName));
+	}
+	FProperty* Prop = FindFProperty<FProperty>(Target->GetClass(), *PropertyName);
 	if (!Prop)
 	{
-		return FString::Printf(TEXT("{\"success\":false,\"message\":\"Property '%s' not found on widget class '%s'\"}"),
-			*AgentJson::EscapeString(PropertyName), *Widget->GetClass()->GetName());
+		return WBPFail(FString::Printf(TEXT("Property '%s' not found on %s"), *PropertyName, *Target->GetClass()->GetName()));
 	}
-
-	void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Widget);
-	Prop->ImportText_Direct(*PropertyValue, ValuePtr, Widget, PPF_None);
-	WidgetBP->MarkPackageDirty();
-
-	return FString::Printf(TEXT("{\"success\":true,\"message\":\"Property '%s' set to '%s'\"}"),
-		*AgentJson::EscapeString(PropertyName), *AgentJson::EscapeString(PropertyValue));
+	void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Target);
+	Target->Modify();
+	Target->PreEditChange(Prop);
+	const TCHAR* Parsed = Prop->ImportText_Direct(*PropertyValue, ValuePtr, Target, PPF_None);
+	FPropertyChangedEvent ChangedEvent(Prop, EPropertyChangeType::ValueSet);
+	Target->PostEditChangeProperty(ChangedEvent);
+	if (!Parsed)
+	{
+		return WBPFail(FString::Printf(TEXT("Cannot parse '%s' as %s (%s)"), *PropertyValue, *Prop->GetCPPType(), *PropertyName));
+	}
+	// 改变是否为变量会增删生成类的成员，按结构性修改处理
+	if (Prop->GetFName() == GET_MEMBER_NAME_CHECKED(UWidget, bIsVariable))
+	{
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
+	}
+	else
+	{
+		FBlueprintEditorUtils::MarkBlueprintAsModified(WidgetBP);
+	}
+	FString Value;
+	Prop->ExportTextItem_Direct(Value, ValuePtr, nullptr, Target, PPF_None);
+	return WBPOk(FString::Printf(TEXT("%s set"), *PropertyName), {AgentJson::Pair(TEXT("value"), Value)});
 }
 
-FString UAgentWidgetBlueprintInfoFunctionLib::SetWidgetProperties(const FString& AssetPath, const FString& WidgetName, const FString& PropertiesJson)
+FString UAgentWidgetBlueprintInfoFunctionLib::AddFunctionParam(const FString& AssetPath, const FString& FunctionName, const FString& ParamName, const FEdGraphPinType& PinType, bool bOutput)
 {
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP || !WidgetBP->WidgetTree)
+	FString Error;
+	UWidgetBlueprint* WidgetBP = WBPLoad(AssetPath, Error);
+	UEdGraph* Graph = WidgetBP ? WBPFindFunction(WidgetBP, FunctionName, Error) : nullptr;
+	if (!Graph)
 	{
-		return TEXT("{\"success\":false,\"message\":\"Failed to load WidgetBlueprint\"}");
+		return WBPFail(Error);
 	}
-
-	UWidget* Widget = FindWidgetInTree(WidgetBP, WidgetName);
-	if (!Widget)
+	UK2Node_FunctionEntry* Entry = WBPFindEntry(Graph);
+	if (!Entry)
 	{
-		return TEXT("{\"success\":false,\"message\":\"Widget not found in WidgetTree\"}");
+		return WBPFail(TEXT("Function entry node not found"));
 	}
-
-	TSharedPtr<FJsonObject> JsonObj;
-	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(PropertiesJson);
-	if (!FJsonSerializer::Deserialize(Reader, JsonObj) || !JsonObj.IsValid())
+	UK2Node_EditablePinBase* Node = bOutput ? static_cast<UK2Node_EditablePinBase*>(FBlueprintEditorUtils::FindOrCreateFunctionResultNode(Entry)) : Entry;
+	if (!Node)
 	{
-		return TEXT("{\"success\":false,\"message\":\"Invalid JSON format for PropertiesJson\"}");
+		return WBPFail(TEXT("Function result node not found and could not be created"));
 	}
-
-	TArray<FString> ResultItems;
-	bool bAnyFailed = false;
-
-	for (const auto& Pair : JsonObj->Values)
+	const FName PinName(*ParamName);
+	// UserDefinedPinExists 没有导出，直接查 UserDefinedPins
+	const bool bExists = Node->UserDefinedPins.ContainsByPredicate([&](const TSharedPtr<FUserPinInfo>& Info) { return Info.IsValid() && Info->PinName == PinName; });
+	if (bExists)
 	{
-		const FString& PropName = Pair.Key;
-		FString PropValue;
-		Pair.Value->TryGetString(PropValue);
-
-		FProperty* Prop = FindFProperty<FProperty>(Widget->GetClass(), *PropName);
-		if (!Prop)
-		{
-			ResultItems.Add(FString::Printf(TEXT("{\"property\":\"%s\",\"success\":false,\"message\":\"Property not found\"}"),
-				*AgentJson::EscapeString(PropName)));
-			bAnyFailed = true;
-			continue;
-		}
-
-		void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Widget);
-		Prop->ImportText_Direct(*PropValue, ValuePtr, Widget, PPF_None);
-		ResultItems.Add(FString::Printf(TEXT("{\"property\":\"%s\",\"success\":true}"),
-			*AgentJson::EscapeString(PropName)));
+		return WBPFail(FString::Printf(TEXT("Parameter already exists: %s"), *ParamName));
 	}
-
-	WidgetBP->MarkPackageDirty();
-
-	TArray<FString> OutPairs;
-	OutPairs.Add(AgentJson::PairBool(TEXT("success"), !bAnyFailed));
-	OutPairs.Add(AgentJson::PairRaw(TEXT("results"), AgentJson::Array(ResultItems)));
-	return AgentJson::Object(OutPairs);
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::SetWidgetSlotProperties(const FString& AssetPath, const FString& WidgetName, const FString& SlotPropertiesJson)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP || !WidgetBP->WidgetTree)
+	Node->Modify();
+	if (!Node->CreateUserDefinedPin(PinName, PinType, bOutput ? EGPD_Input : EGPD_Output))
 	{
-		return TEXT("{\"success\":false,\"message\":\"Failed to load WidgetBlueprint\"}");
+		return WBPFail(FString::Printf(TEXT("Failed to create parameter: %s"), *ParamName));
 	}
-
-	UWidget* Widget = FindWidgetInTree(WidgetBP, WidgetName);
-	if (!Widget)
-	{
-		return TEXT("{\"success\":false,\"message\":\"Widget not found in WidgetTree\"}");
-	}
-
-	if (!Widget->Slot)
-	{
-		return TEXT("{\"success\":false,\"message\":\"Widget has no Slot\"}");
-	}
-
-	TSharedPtr<FJsonObject> JsonObj;
-	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(SlotPropertiesJson);
-	if (!FJsonSerializer::Deserialize(Reader, JsonObj) || !JsonObj.IsValid())
-	{
-		return TEXT("{\"success\":false,\"message\":\"Invalid JSON format for SlotPropertiesJson\"}");
-	}
-
-	TArray<FString> ResultItems;
-	bool bAnyFailed = false;
-
-	for (const auto& Pair : JsonObj->Values)
-	{
-		const FString& PropName = Pair.Key;
-		FString PropValue;
-		Pair.Value->TryGetString(PropValue);
-
-		FProperty* Prop = FindFProperty<FProperty>(Widget->Slot->GetClass(), *PropName);
-		if (!Prop)
-		{
-			ResultItems.Add(FString::Printf(TEXT("{\"property\":\"%s\",\"success\":false,\"message\":\"Slot property not found\"}"),
-				*AgentJson::EscapeString(PropName)));
-			bAnyFailed = true;
-			continue;
-		}
-
-		void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Widget->Slot);
-		Prop->ImportText_Direct(*PropValue, ValuePtr, Widget->Slot, PPF_None);
-		ResultItems.Add(FString::Printf(TEXT("{\"property\":\"%s\",\"success\":true}"),
-			*AgentJson::EscapeString(PropName)));
-	}
-
-	WidgetBP->MarkPackageDirty();
-
-	TArray<FString> OutPairs;
-	OutPairs.Add(AgentJson::PairBool(TEXT("success"), !bAnyFailed));
-	OutPairs.Add(AgentJson::PairRaw(TEXT("results"), AgentJson::Array(ResultItems)));
-	return AgentJson::Object(OutPairs);
-}
-
-// ==================== 蓝图函数编辑 ====================
-
-FString UAgentWidgetBlueprintInfoFunctionLib::AddBlueprintFunction(const FString& AssetPath, const FString& FunctionName)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("{\"success\":false,\"message\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-	for (UEdGraph* Graph : WidgetBP->FunctionGraphs)
-	{
-		if (Graph && Graph->GetName() == FunctionName)
-		{
-			return FString::Printf(TEXT("{\"success\":false,\"message\":\"Function '%s' already exists\"}"),
-				*AgentJson::EscapeString(FunctionName));
-		}
-	}
-
-	UEdGraph* NewGraph = FBlueprintEditorUtils::CreateNewGraph(
-		WidgetBP,
-		FName(*FunctionName),
-		UEdGraph::StaticClass(),
-		UEdGraphSchema_K2::StaticClass()
-	);
-
-	if (!NewGraph)
-	{
-		return TEXT("{\"success\":false,\"message\":\"Failed to create function graph\"}");
-	}
-
-	FBlueprintEditorUtils::AddFunctionGraph<UClass>(WidgetBP, NewGraph, false, nullptr);
-	WidgetBP->MarkPackageDirty();
-
-	return FString::Printf(TEXT("{\"success\":true,\"message\":\"Function '%s' created\",\"graph_name\":\"%s\"}"),
-		*AgentJson::EscapeString(FunctionName), *AgentJson::EscapeString(NewGraph->GetName()));
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::RemoveBlueprintFunction(const FString& AssetPath, const FString& FunctionName)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("{\"success\":false,\"message\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-	UEdGraph* TargetGraph = nullptr;
-	for (UEdGraph* Graph : WidgetBP->FunctionGraphs)
-	{
-		if (Graph && Graph->GetName() == FunctionName)
-		{
-			TargetGraph = Graph;
-			break;
-		}
-	}
-
-	if (!TargetGraph)
-	{
-		return FString::Printf(TEXT("{\"success\":false,\"message\":\"Function '%s' not found\"}"),
-			*AgentJson::EscapeString(FunctionName));
-	}
-
-	FBlueprintEditorUtils::RemoveGraph(WidgetBP, TargetGraph, EGraphRemoveFlags::Recompile);
-	WidgetBP->MarkPackageDirty();
-
-	return FString::Printf(TEXT("{\"success\":true,\"message\":\"Function '%s' removed\"}"),
-		*AgentJson::EscapeString(FunctionName));
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::RenameBlueprintFunction(const FString& AssetPath, const FString& OldFunctionName, const FString& NewFunctionName)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("{\"success\":false,\"message\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-	UEdGraph* TargetGraph = nullptr;
-	for (UEdGraph* Graph : WidgetBP->FunctionGraphs)
-	{
-		if (Graph && Graph->GetName() == OldFunctionName)
-		{
-			TargetGraph = Graph;
-			break;
-		}
-	}
-
-	if (!TargetGraph)
-	{
-		return FString::Printf(TEXT("{\"success\":false,\"message\":\"Function '%s' not found\"}"),
-			*AgentJson::EscapeString(OldFunctionName));
-	}
-
-	for (UEdGraph* Graph : WidgetBP->FunctionGraphs)
-	{
-		if (Graph && Graph->GetName() == NewFunctionName)
-		{
-			return FString::Printf(TEXT("{\"success\":false,\"message\":\"Function name '%s' already exists\"}"),
-				*AgentJson::EscapeString(NewFunctionName));
-		}
-	}
-
-	FBlueprintEditorUtils::RenameGraph(TargetGraph, NewFunctionName);
-	WidgetBP->MarkPackageDirty();
-
-	return FString::Printf(TEXT("{\"success\":true,\"message\":\"Function renamed from '%s' to '%s'\"}"),
-		*AgentJson::EscapeString(OldFunctionName), *AgentJson::EscapeString(NewFunctionName));
-}
-
-static FName WBPParamTypeToPinCategory(const FString& ParamType)
-{
-	if (ParamType.Equals(TEXT("bool"), ESearchCase::IgnoreCase))    return UEdGraphSchema_K2::PC_Boolean;
-	if (ParamType.Equals(TEXT("int"), ESearchCase::IgnoreCase))     return UEdGraphSchema_K2::PC_Int;
-	if (ParamType.Equals(TEXT("float"), ESearchCase::IgnoreCase))   return UEdGraphSchema_K2::PC_Real;
-	if (ParamType.Equals(TEXT("string"), ESearchCase::IgnoreCase))  return UEdGraphSchema_K2::PC_String;
-	if (ParamType.Equals(TEXT("text"), ESearchCase::IgnoreCase))    return UEdGraphSchema_K2::PC_Text;
-	if (ParamType.Equals(TEXT("name"), ESearchCase::IgnoreCase))    return UEdGraphSchema_K2::PC_Name;
-	if (ParamType.Equals(TEXT("object"), ESearchCase::IgnoreCase))  return UEdGraphSchema_K2::PC_Object;
-	if (ParamType.Equals(TEXT("class"), ESearchCase::IgnoreCase))   return UEdGraphSchema_K2::PC_Class;
-	if (ParamType.Equals(TEXT("struct"), ESearchCase::IgnoreCase))  return UEdGraphSchema_K2::PC_Struct;
-	return UEdGraphSchema_K2::PC_Wildcard;
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::AddFunctionInputParam(const FString& AssetPath, const FString& FunctionName, const FString& ParamName, const FString& ParamType)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("{\"success\":false,\"message\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-	UEdGraph* TargetGraph = nullptr;
-	for (UEdGraph* Graph : WidgetBP->FunctionGraphs)
-	{
-		if (Graph && Graph->GetName() == FunctionName)
-		{
-			TargetGraph = Graph;
-			break;
-		}
-	}
-
-	if (!TargetGraph)
-	{
-		return FString::Printf(TEXT("{\"success\":false,\"message\":\"Function '%s' not found\"}"),
-			*AgentJson::EscapeString(FunctionName));
-	}
-
-	UK2Node_FunctionEntry* EntryNode = nullptr;
-	for (UEdGraphNode* Node : TargetGraph->Nodes)
-	{
-		EntryNode = Cast<UK2Node_FunctionEntry>(Node);
-		if (EntryNode) break;
-	}
-
-	if (!EntryNode)
-	{
-		return TEXT("{\"success\":false,\"message\":\"Function entry node not found\"}");
-	}
-
-	FEdGraphPinType PinType;
-	PinType.PinCategory = WBPParamTypeToPinCategory(ParamType);
-
-	EntryNode->CreateUserDefinedPin(FName(*ParamName), PinType, EGPD_Output);
-	FBlueprintEditorUtils::MarkBlueprintAsModified(WidgetBP);
-	WidgetBP->MarkPackageDirty();
-
-	return FString::Printf(TEXT("{\"success\":true,\"message\":\"Input param '%s' (%s) added to function '%s'\"}"),
-		*AgentJson::EscapeString(ParamName), *AgentJson::EscapeString(ParamType), *AgentJson::EscapeString(FunctionName));
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::AddFunctionOutputParam(const FString& AssetPath, const FString& FunctionName, const FString& ParamName, const FString& ParamType)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("{\"success\":false,\"message\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-	UEdGraph* TargetGraph = nullptr;
-	for (UEdGraph* Graph : WidgetBP->FunctionGraphs)
-	{
-		if (Graph && Graph->GetName() == FunctionName)
-		{
-			TargetGraph = Graph;
-			break;
-		}
-	}
-
-	if (!TargetGraph)
-	{
-		return FString::Printf(TEXT("{\"success\":false,\"message\":\"Function '%s' not found\"}"),
-			*AgentJson::EscapeString(FunctionName));
-	}
-
-	UEdGraphNode* ResultNode = nullptr;
-	for (UEdGraphNode* Node : TargetGraph->Nodes)
-	{
-		if (Node && Node->GetClass()->GetName().Contains(TEXT("FunctionResult")))
-		{
-			ResultNode = Node;
-			break;
-		}
-	}
-
-	if (!ResultNode)
-	{
-		return TEXT("{\"success\":false,\"message\":\"Function result node not found\"}");
-	}
-
-	UK2Node_EditablePinBase* EditableResult = Cast<UK2Node_EditablePinBase>(ResultNode);
-	if (!EditableResult)
-	{
-		return TEXT("{\"success\":false,\"message\":\"Result node is not editable\"}");
-	}
-
-	FEdGraphPinType PinType;
-	PinType.PinCategory = WBPParamTypeToPinCategory(ParamType);
-
-	EditableResult->CreateUserDefinedPin(FName(*ParamName), PinType, EGPD_Input);
-	FBlueprintEditorUtils::MarkBlueprintAsModified(WidgetBP);
-	WidgetBP->MarkPackageDirty();
-
-	return FString::Printf(TEXT("{\"success\":true,\"message\":\"Output param '%s' (%s) added to function '%s'\"}"),
-		*AgentJson::EscapeString(ParamName), *AgentJson::EscapeString(ParamType), *AgentJson::EscapeString(FunctionName));
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
+	return WBPOk(FString::Printf(TEXT("%s '%s' added to %s"), bOutput ? TEXT("Output") : TEXT("Input"), *ParamName, *FunctionName),
+		{AgentJson::PairRaw(TEXT("param"), WBPPinTypeJson(PinType, {AgentJson::Pair(TEXT("name"), ParamName)}))});
 }
 
 FString UAgentWidgetBlueprintInfoFunctionLib::SetFunctionDescription(const FString& AssetPath, const FString& FunctionName, const FString& Description)
 {
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
+	FString Error;
+	UWidgetBlueprint* WidgetBP = WBPLoad(AssetPath, Error);
+	UEdGraph* Graph = WidgetBP ? WBPFindFunction(WidgetBP, FunctionName, Error) : nullptr;
+	if (!Graph)
 	{
-		return TEXT("{\"success\":false,\"message\":\"Failed to load WidgetBlueprint\"}");
+		return WBPFail(Error);
 	}
-
-	UEdGraph* TargetGraph = nullptr;
-	for (UEdGraph* Graph : WidgetBP->FunctionGraphs)
+	UK2Node_FunctionEntry* Entry = WBPFindEntry(Graph);
+	if (!Entry)
 	{
-		if (Graph && Graph->GetName() == FunctionName)
-		{
-			TargetGraph = Graph;
-			break;
-		}
+		return WBPFail(TEXT("Function entry node not found"));
 	}
-
-	if (!TargetGraph)
-	{
-		return FString::Printf(TEXT("{\"success\":false,\"message\":\"Function '%s' not found\"}"),
-			*AgentJson::EscapeString(FunctionName));
-	}
-
-	UK2Node_FunctionEntry* EntryNode = nullptr;
-	for (UEdGraphNode* Node : TargetGraph->Nodes)
-	{
-		EntryNode = Cast<UK2Node_FunctionEntry>(Node);
-		if (EntryNode) break;
-	}
-
-	if (!EntryNode)
-	{
-		return TEXT("{\"success\":false,\"message\":\"Function entry node not found\"}");
-	}
-
-	EntryNode->MetaData.ToolTip = FText::FromString(Description);
+	Entry->Modify();
+	Entry->MetaData.ToolTip = FText::FromString(Description);
 	FBlueprintEditorUtils::MarkBlueprintAsModified(WidgetBP);
-	WidgetBP->MarkPackageDirty();
-
-	return FString::Printf(TEXT("{\"success\":true,\"message\":\"Description set for function '%s'\"}"),
-		*AgentJson::EscapeString(FunctionName));
-}
-
-// ==================== 蓝图函数阅读 ====================
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetBlueprintFunctionDetail(const FString& AssetPath, const FString& FunctionName)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("{\"error\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-	UEdGraph* TargetGraph = nullptr;
-	for (UEdGraph* Graph : WidgetBP->FunctionGraphs)
-	{
-		if (Graph && Graph->GetName() == FunctionName)
-		{
-			TargetGraph = Graph;
-			break;
-		}
-	}
-
-	if (!TargetGraph)
-	{
-		return FString::Printf(TEXT("{\"error\":\"Function '%s' not found\"}"), *AgentJson::EscapeString(FunctionName));
-	}
-
-	TArray<FString> Pairs;
-	Pairs.Add(AgentJson::Pair(TEXT("name"), TargetGraph->GetName()));
-	Pairs.Add(AgentJson::PairInt(TEXT("node_count"), TargetGraph->Nodes.Num()));
-
-	TArray<FString> InputItems;
-	TArray<FString> OutputItems;
-	FString Description;
-
-	for (UEdGraphNode* Node : TargetGraph->Nodes)
-	{
-		UK2Node_FunctionEntry* EntryNode = Cast<UK2Node_FunctionEntry>(Node);
-		if (EntryNode)
-		{
-			Description = EntryNode->MetaData.ToolTip.ToString();
-			for (UEdGraphPin* Pin : EntryNode->Pins)
-			{
-				if (!Pin || Pin->Direction != EGPD_Output) continue;
-				if (Pin->PinName == UEdGraphSchema_K2::PN_Then) continue;
-
-				TArray<FString> PinPairs;
-				PinPairs.Add(AgentJson::Pair(TEXT("name"), Pin->PinName.ToString()));
-				PinPairs.Add(AgentJson::Pair(TEXT("type"), Pin->PinType.PinCategory.ToString()));
-				if (Pin->PinType.PinSubCategoryObject.IsValid())
-				{
-					PinPairs.Add(AgentJson::Pair(TEXT("sub_type"), Pin->PinType.PinSubCategoryObject->GetName()));
-				}
-				InputItems.Add(AgentJson::Object(PinPairs));
-			}
-			continue;
-		}
-
-		if (Node && Node->GetClass()->GetName().Contains(TEXT("FunctionResult")))
-		{
-			for (UEdGraphPin* Pin : Node->Pins)
-			{
-				if (!Pin || Pin->Direction != EGPD_Input) continue;
-				if (Pin->PinName == UEdGraphSchema_K2::PN_Execute) continue;
-
-				TArray<FString> PinPairs;
-				PinPairs.Add(AgentJson::Pair(TEXT("name"), Pin->PinName.ToString()));
-				PinPairs.Add(AgentJson::Pair(TEXT("type"), Pin->PinType.PinCategory.ToString()));
-				if (Pin->PinType.PinSubCategoryObject.IsValid())
-				{
-					PinPairs.Add(AgentJson::Pair(TEXT("sub_type"), Pin->PinType.PinSubCategoryObject->GetName()));
-				}
-				OutputItems.Add(AgentJson::Object(PinPairs));
-			}
-		}
-	}
-
-	Pairs.Add(AgentJson::Pair(TEXT("description"), Description));
-	Pairs.Add(AgentJson::PairRaw(TEXT("inputs"), AgentJson::Array(InputItems)));
-	Pairs.Add(AgentJson::PairRaw(TEXT("outputs"), AgentJson::Array(OutputItems)));
-
-	return AgentJson::Object(Pairs);
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetFunctionGraphNodes(const FString& AssetPath, const FString& FunctionName)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("{\"error\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-	UEdGraph* TargetGraph = nullptr;
-	for (UEdGraph* Graph : WidgetBP->FunctionGraphs)
-	{
-		if (Graph && Graph->GetName() == FunctionName)
-		{
-			TargetGraph = Graph;
-			break;
-		}
-	}
-
-	if (!TargetGraph)
-	{
-		return FString::Printf(TEXT("{\"error\":\"Function '%s' not found\"}"), *AgentJson::EscapeString(FunctionName));
-	}
-
-	TArray<FString> Items;
-	for (UEdGraphNode* Node : TargetGraph->Nodes)
-	{
-		if (!Node) continue;
-		Items.Add(NodeToJson(Node, true));
-	}
-
-	return AgentJson::Array(Items);
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::GetFunctionParams(const FString& AssetPath, const FString& FunctionName)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("{\"error\":\"Failed to load WidgetBlueprint\"}");
-	}
-
-	UEdGraph* TargetGraph = nullptr;
-	for (UEdGraph* Graph : WidgetBP->FunctionGraphs)
-	{
-		if (Graph && Graph->GetName() == FunctionName)
-		{
-			TargetGraph = Graph;
-			break;
-		}
-	}
-
-	if (!TargetGraph)
-	{
-		return FString::Printf(TEXT("{\"error\":\"Function '%s' not found\"}"), *AgentJson::EscapeString(FunctionName));
-	}
-
-	TArray<FString> InputItems;
-	TArray<FString> OutputItems;
-
-	for (UEdGraphNode* Node : TargetGraph->Nodes)
-	{
-		UK2Node_FunctionEntry* EntryNode = Cast<UK2Node_FunctionEntry>(Node);
-		if (EntryNode)
-		{
-			for (UEdGraphPin* Pin : EntryNode->Pins)
-			{
-				if (!Pin || Pin->Direction != EGPD_Output) continue;
-				if (Pin->PinName == UEdGraphSchema_K2::PN_Then) continue;
-
-				TArray<FString> PinPairs;
-				PinPairs.Add(AgentJson::Pair(TEXT("name"), Pin->PinName.ToString()));
-				PinPairs.Add(AgentJson::Pair(TEXT("type"), Pin->PinType.PinCategory.ToString()));
-				if (Pin->PinType.PinSubCategoryObject.IsValid())
-				{
-					PinPairs.Add(AgentJson::Pair(TEXT("sub_type"), Pin->PinType.PinSubCategoryObject->GetName()));
-				}
-				InputItems.Add(AgentJson::Object(PinPairs));
-			}
-			continue;
-		}
-
-		if (Node && Node->GetClass()->GetName().Contains(TEXT("FunctionResult")))
-		{
-			for (UEdGraphPin* Pin : Node->Pins)
-			{
-				if (!Pin || Pin->Direction != EGPD_Input) continue;
-				if (Pin->PinName == UEdGraphSchema_K2::PN_Execute) continue;
-
-				TArray<FString> PinPairs;
-				PinPairs.Add(AgentJson::Pair(TEXT("name"), Pin->PinName.ToString()));
-				PinPairs.Add(AgentJson::Pair(TEXT("type"), Pin->PinType.PinCategory.ToString()));
-				if (Pin->PinType.PinSubCategoryObject.IsValid())
-				{
-					PinPairs.Add(AgentJson::Pair(TEXT("sub_type"), Pin->PinType.PinSubCategoryObject->GetName()));
-				}
-				OutputItems.Add(AgentJson::Object(PinPairs));
-			}
-		}
-	}
-
-	TArray<FString> Pairs;
-	Pairs.Add(AgentJson::PairRaw(TEXT("inputs"), AgentJson::Array(InputItems)));
-	Pairs.Add(AgentJson::PairRaw(TEXT("outputs"), AgentJson::Array(OutputItems)));
-	return AgentJson::Object(Pairs);
-}
-
-FString UAgentWidgetBlueprintInfoFunctionLib::SearchBlueprintFunctions(const FString& AssetPath, const FString& Keyword)
-{
-	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(AssetPath);
-	if (!WidgetBP)
-	{
-		return TEXT("[]");
-	}
-
-	TArray<FString> Items;
-	for (UEdGraph* Graph : WidgetBP->FunctionGraphs)
-	{
-		if (!Graph) continue;
-
-		const FString GraphName = Graph->GetName();
-		if (!GraphName.Contains(Keyword, ESearchCase::IgnoreCase)) continue;
-
-		int32 InputCount = 0;
-		int32 OutputCount = 0;
-		FString Description;
-
-		for (UEdGraphNode* Node : Graph->Nodes)
-		{
-			UK2Node_FunctionEntry* EntryNode = Cast<UK2Node_FunctionEntry>(Node);
-			if (EntryNode)
-			{
-				Description = EntryNode->MetaData.ToolTip.ToString();
-				for (UEdGraphPin* Pin : EntryNode->Pins)
-				{
-					if (!Pin || Pin->Direction != EGPD_Output) continue;
-					if (Pin->PinName == UEdGraphSchema_K2::PN_Then) continue;
-					InputCount++;
-				}
-				continue;
-			}
-
-			if (Node && Node->GetClass()->GetName().Contains(TEXT("FunctionResult")))
-			{
-				for (UEdGraphPin* Pin : Node->Pins)
-				{
-					if (!Pin || Pin->Direction != EGPD_Input) continue;
-					if (Pin->PinName == UEdGraphSchema_K2::PN_Execute) continue;
-					OutputCount++;
-				}
-			}
-		}
-
-		TArray<FString> Pairs;
-		Pairs.Add(AgentJson::Pair(TEXT("name"), GraphName));
-		Pairs.Add(AgentJson::PairInt(TEXT("input_count"), InputCount));
-		Pairs.Add(AgentJson::PairInt(TEXT("output_count"), OutputCount));
-		Pairs.Add(AgentJson::Pair(TEXT("description"), Description));
-		Items.Add(AgentJson::Object(Pairs));
-	}
-
-	return AgentJson::Array(Items);
+	return WBPOk(FString::Printf(TEXT("Description set for %s"), *FunctionName));
 }

@@ -36,7 +36,7 @@ python scripts/ue_cli.py discover                              # 确认编辑器
 |----|------|--------|
 | CLI / Bridge | `scripts/ue_cli.py`、`ue_bridge.py`、`ue_log.py` | 入口与传输；本地截图、日志观察、跨帧等待、编码与超时 |
 | Lib | `scripts/lib/*.py`、`*.sequence.json` | 常用 Python 动作与跨帧步骤清单，只组合现有接口 |
-| 编辑器侧模块 | `scripts/editor/*.py`（如 `ue_input`） | 编辑器内可 `import` 的组合实现：点击、长按、拖动、文本输入等都由 C++ 原子步骤在这里拼装，Lib 与项目脚本共用，别处不重复实现 |
+| 编辑器侧模块 | `scripts/editor/*.py`（`ue_input`、`ue_wbp`、`ue_common`） | 编辑器内可 `import` 的组合实现：界面输入（点击、长按、拖动、文本输入）和 WBP 读写（树、属性、事件、函数、继承链）都由 C++ 原子接口在这里拼装，Lib 与项目脚本共用，别处不重复实现。C++ 只放 Python 访问不到的原子能力 |
 | Reference | `references/*.md` | 接口与用法文档，按需读取 |
 | AgentTools | 工程插件 `Plugins/AgentTools`（安装器从本仓库链接进工程） | Python 访问不到的 C++ 能力（Slate 读取与输入、Widget 蓝图编辑），仅编辑器。改了函数体用 Live Coding；新增或改了 `UFUNCTION` 签名要重启编辑器 |
 
@@ -57,7 +57,7 @@ python scripts/ue_cli.py discover                              # 确认编辑器
 | CLI 参数、脚本传参、跨帧步骤序列、日志等待/读取、Lib 列表、错误类型、环境配置 | [cli.md](references/cli.md) |
 | 确认界面效果、截图、像人一样操作编辑器 | [ui_verify.md](references/ui_verify.md) |
 | Slate 控件树、查找控件、点击/输入接口 | [slate_driver.md](references/slate_driver.md) |
-| 读取 Widget 蓝图结构、属性、函数 | [widget_blueprint_info.md](references/widget_blueprint_info.md) |
+| 读写 Widget 蓝图（`ue_wbp`：结构、属性、事件、函数、继承链） | [widget_blueprint_info.md](references/widget_blueprint_info.md) |
 | 修改 Widget 蓝图（勾变量、加控件、改名移动、编译保存） | [widget_blueprint_edit.md](references/widget_blueprint_edit.md) |
 | Actor、关卡 | [scene_operations.md](references/scene_operations.md) |
 | 资产查找/导入/导出 | [asset_operations.md](references/asset_operations.md) |
