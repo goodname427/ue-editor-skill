@@ -4,7 +4,7 @@ ue-editor 安装器 - 把本仓库的 Skill 与 AgentTools 插件链接到 Agent
 
 用法:
   python install.py --skills <Skill目录> [--skills ...] --project <工程目录或.uproject> [--project ...]
-  python install.py --uninstall --skills <Skill目录> --project <工程目录>
+  python install.py --uninstall --skills <Skill目录> --project <工程目录>   卸载前先关闭编辑器
   python install.py                                   不带参数时交互输入
 
 链接方式（Windows 用目录联接 junction，无需管理员；其它系统用符号链接）:
@@ -130,21 +130,30 @@ def uninstall_skill(skills_dir):
 def uninstall_plugin(project):
     plugin_dir = os.path.join(_project_dir(project), 'Plugins', PLUGIN_NAME)
     source = os.path.join(plugin_dir, 'Source')
-    if _link_target(source) != _norm(os.path.join(PLUGIN_SRC, 'Source')):
+    uplugin = os.path.join(plugin_dir, UPLUGIN)
+    ours = _link_target(source) == _norm(os.path.join(PLUGIN_SRC, 'Source'))
+    if not ours and os.path.lexists(source):
         print('[skip]    %s 不是本仓库安装的插件' % plugin_dir)
         return
-    _remove_link(source)
-    for name in os.listdir(plugin_dir):
+    if not os.path.isdir(plugin_dir):
+        print('[skip]    %s 不存在' % plugin_dir)
+        return
+    # 先删编译产物（编辑器占用 DLL 时会在这里失败），Source 链接最后删，失败后可直接重跑
+    for name in ('Binaries', 'Intermediate'):
         path = os.path.join(plugin_dir, name)
-        if name in ('Binaries', 'Intermediate') and _link_target(path) is None:
+        if os.path.isdir(path) and _link_target(path) is None:
             shutil.rmtree(path)
-        elif name == UPLUGIN:
-            os.unlink(path)
-    if not os.listdir(plugin_dir):
+    # uplugin 可能是符号链接，也可能是安装时退化出的硬链接/复制
+    if os.path.lexists(uplugin) and (ours or _link_target(uplugin) == _norm(os.path.join(PLUGIN_SRC, UPLUGIN))):
+        os.unlink(uplugin)
+    if ours:
+        _remove_link(source)
+    left = os.listdir(plugin_dir)
+    if not left:
         os.rmdir(plugin_dir)
         print('[remove]  %s' % plugin_dir)
     else:
-        print('[remove]  %s 中的链接与编译产物（目录内还有其它文件，已保留）' % plugin_dir)
+        print('[warn]    %s 已移除链接，但目录内还有未删除的文件: %s' % (plugin_dir, ', '.join(left)))
 
 
 def _check_python_deps():
