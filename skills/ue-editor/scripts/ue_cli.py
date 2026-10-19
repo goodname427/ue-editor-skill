@@ -125,6 +125,21 @@ def _condition_true(bridge, expr):
     return r['status'] == 'ok' and r['result'] == 'True'
 
 
+def _poll(bridge, expr, deadline):
+    """求值只读条件直到为真或到时间；单次求值超时时不重发，而是继续收那条还没回来的结果。"""
+    while True:
+        r = bridge.evaluate('bool(%s)' % expr)
+        while r['status'] != 'ok' and r.get('resumable') and time.monotonic() < deadline:
+            r = bridge.receive_command()
+        if r['status'] != 'ok':
+            return r
+        if r['result'] == 'True':
+            return {'status': 'ok', 'result': r['result']}
+        if time.monotonic() >= deadline:
+            return {'status': 'timeout', 'result': r['result']}
+        time.sleep(max(0, min(0.5, deadline - time.monotonic())))
+
+
 def _complete_input(bridge, result):
     if result['status'] != 'ok':
         return result
@@ -184,17 +199,14 @@ def _wait_until(bridge, result, args):
     if result['status'] != 'ok' or not args.wait_until:
         return result
     begin = time.time()
-    while True:
-        r = bridge.evaluate('bool(%s)' % args.wait_until)
-        if r['status'] != 'ok':
-            return r
-        if r['result'] == 'True':
-            result['waited'] = round(time.time() - begin, 1)
-            return result
-        if time.time() - begin >= args.wait:
-            return {'status': 'error', 'error_type': 'WaitTimeout', 'output': result.get('output', ''),
-                    'message': f'{args.wait}s 内 --wait-until 条件仍不成立。'}
-        time.sleep(1)
+    r = _poll(bridge, args.wait_until, begin + args.wait)
+    if r['status'] == 'ok':
+        result['waited'] = round(time.time() - begin, 1)
+        return result
+    if r['status'] == 'timeout':
+        return {'status': 'error', 'error_type': 'WaitTimeout', 'output': result.get('output', ''),
+                'message': f'{args.wait}s 内 --wait-until 条件仍不成立。'}
+    return r
 
 
 def _split_script_args(tokens):
@@ -273,24 +285,21 @@ def _sequence_wait(bridge, step, phase):
     if not expression:
         return {'status': 'ok'}
     begin = time.monotonic()
-    while True:
-        result = bridge.evaluate('bool(%s)' % expression)
-        if result['status'] != 'ok':
-            return result
-        if result['result'] == 'True':
-            return {'status': 'ok', 'waited': round(time.monotonic() - begin, 2)}
-        if time.monotonic() - begin >= step['wait']:
-            failure = {'status': 'error', 'error_type': 'SequenceWaitTimeout',
-                       'message': '%s 等待 %ss 后条件仍未成立；未重发操作。' % (step['name'], step['wait']),
-                       'condition': expression, 'last_condition': result['result']}
-            if step.get('state'):
-                state = bridge.evaluate(step['state'])
-                if state['status'] == 'ok':
-                    failure['last_state'] = str(state.get('result', ''))[:4000]
-                else:
-                    failure['state_error'] = state
-            return failure
-        time.sleep(min(0.5, max(0, step['wait'] - (time.monotonic() - begin))))
+    result = _poll(bridge, expression, begin + step['wait'])
+    if result['status'] == 'ok':
+        return {'status': 'ok', 'waited': round(time.monotonic() - begin, 2)}
+    if result['status'] != 'timeout':
+        return result
+    failure = {'status': 'error', 'error_type': 'SequenceWaitTimeout',
+               'message': '%s 等待 %ss 后条件仍未成立；未重发操作。' % (step['name'], step['wait']),
+               'condition': expression, 'last_condition': result.get('result')}
+    if step.get('state'):
+        state = bridge.evaluate(step['state'])
+        if state['status'] == 'ok':
+            failure['last_state'] = str(state.get('result', ''))[:4000]
+        else:
+            failure['state_error'] = state
+    return failure
 
 
 def _run_sequence(bridge, steps):
@@ -315,6 +324,9 @@ def _run_sequence(bridge, steps):
                         result['last_state'] = str(state.get('result', ''))[:4000]
                     else:
                         result['state_error'] = state
+                if phase == 'wait_before' and 'NameError' in str(result.get('message', '')):
+                    result['hint'] = ('wait_before 在动作脚本执行前求值，看不到本步脚本里定义的函数；'
+                                      '条件要么改成直接查询表达式，要么放到上一步的 wait_until')
                 return dict(result, step=step['name'], step_index=index, phase=phase,
                             command_sent=phase != 'wait_before', output=output, completed=completed, timings=timings)
         completed.append({'step': step['name'], 'output': output, 'waited': result.get('waited', 0), 'timings': timings})

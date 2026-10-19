@@ -153,9 +153,9 @@ def _error(error_type, message, suggestion='', output=''):
 
 
 def _output_text(output):
-    """UE 返回的 output 是 [{type, output}] 列表，拼成纯文本；统一为 \\n 换行（UE 日志会把 \\r\\n 再转一次）。"""
+    """UE 返回的 output 是 [{type, output}] 列表，每项一行且不带换行，按行拼成纯文本；统一为 \\n 换行（UE 日志会把 \\r\\n 再转一次）。"""
     if isinstance(output, list):
-        output = ''.join(o.get('output', '') for o in output if isinstance(o, dict))
+        output = ''.join(o.get('output', '').rstrip('\r\n') + '\n' for o in output if isinstance(o, dict))
     return (output or '').replace('\r', '')
 
 
@@ -384,6 +384,13 @@ class UEBridge:
     # ----------------------------------------------------------
     def run_command(self, command, exec_mode=MODE_EXEC_FILE, unattended=True):
         """向 UE 编辑器发送 Python 命令并返回结果。"""
+        sent = self.send_command(command, exec_mode, unattended)
+        if sent['status'] != 'ok':
+            return sent
+        return self.receive_command()
+
+    def send_command(self, command, exec_mode=MODE_EXEC_FILE, unattended=True):
+        """只发送命令，不等待结果；配合 receive_command 可在超时后继续收，而不是重发。"""
         if not self.is_connected:
             return _error('NotConnected', '尚未建立连接。', '请先调用 connect() 连接到 UE 编辑器。')
         try:
@@ -393,8 +400,16 @@ class UEBridge:
                 'exec_mode': exec_mode,
             })
             self._cmd_channel_sock.sendall(msg.to_bytes())
+            return _ok()
+        except Exception as e:
+            return _error('CommandError', str(e))
 
-            # 接收结果：TCP 分段到达，收到能完整解析为止
+    def receive_command(self):
+        """等待并解析一条命令结果。超时返回 Timeout 且 resumable=True：命令可能仍在执行，可继续调用本方法收结果。"""
+        if not self.is_connected:
+            return _error('NotConnected', '尚未建立连接。', '请先调用 connect() 连接到 UE 编辑器。')
+        try:
+            # 接收结果：TCP 分段到达，收到能完整解析为止；解析失败时清空已积累的旧数据再试
             data = b''
             result_msg = _Message()
             parsed = False
@@ -403,7 +418,10 @@ class UEBridge:
                 if not part:
                     break
                 data += part
+                result_msg = _Message()
                 parsed = result_msg.from_bytes(data)
+                if not parsed:
+                    data = data[-DEFAULT_RECEIVE_BUFFER_SIZE:]
 
             if not parsed:
                 return _error('InvalidResponse', f'UE 编辑器返回了无效响应（已收 {len(data)} 字节，连接被关闭）。')
@@ -429,7 +447,7 @@ class UEBridge:
                 f'等待结果超时 ({self._command_timeout}s)。',
                 '编辑器可能仍在执行该命令（如 rename_asset 触发 P4 签出会卡 1~3 分钟），不要重发；'
                 '稍后用 exec "print(1)" 探测编辑器恢复后再核对结果，长任务用 --timeout 加大等待。',
-            )
+            ) | {'resumable': True}
         except Exception as e:
             return _error('CommandError', str(e))
 

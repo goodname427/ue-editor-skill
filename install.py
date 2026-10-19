@@ -11,6 +11,7 @@ ue-editor 安装器 - 把本仓库的 Skill 与 AgentTools 插件链接到 Agent
   <Skill目录>/ue-editor                    -> <仓库>/skills/ue-editor
   <工程>/Plugins/AgentTools/Source         -> <仓库>/Plugins/AgentTools/Source
   <工程>/Plugins/AgentTools/AgentTools.uplugin  符号链接，失败时退化为硬链接/复制
+  <rules目录>/ue-editor.md                 复制自 <仓库>/rules/ue-editor.md（IDE 可能回写文件，规则用复制）
 
 插件目录本身留在工程内，Binaries / Intermediate 按工程各自生成，多个工程或分支共享同一份源码互不干扰。
 之后 git pull 即可更新；uplugin 只在增减模块时变化，若安装时退化为复制，届时重跑一次安装器。
@@ -25,6 +26,8 @@ import subprocess
 REPO = os.path.dirname(os.path.abspath(__file__))
 SKILL_NAME = 'ue-editor'
 SKILL_SRC = os.path.join(REPO, 'skills', SKILL_NAME)
+RULE_NAME = 'ue-editor.md'
+RULE_SRC = os.path.join(REPO, 'rules', RULE_NAME)
 PLUGIN_NAME = 'AgentTools'
 PLUGIN_SRC = os.path.join(REPO, 'Plugins', PLUGIN_NAME)
 UPLUGIN = PLUGIN_NAME + '.uplugin'
@@ -109,6 +112,22 @@ def install_skill(skills_dir):
     _link_dir(os.path.join(os.path.abspath(os.path.expanduser(skills_dir)), SKILL_NAME), SKILL_SRC)
 
 
+def _read(path):
+    with open(path, 'rb') as fp:
+        return fp.read()
+
+
+def install_rule(rules_dir):
+    # 规则不建链接：IDE 可能回写 updatedAt 等字段，链接会改到仓库文件
+    dest = os.path.join(os.path.abspath(os.path.expanduser(rules_dir)), RULE_NAME)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    if os.path.isfile(dest) and _read(dest) == _read(RULE_SRC):
+        print('[ok]      %s' % dest)
+        return
+    shutil.copyfile(RULE_SRC, dest)
+    print('[copy]    %s' % dest)
+
+
 def install_plugin(project):
     plugin_dir = os.path.join(_project_dir(project), 'Plugins', PLUGIN_NAME)
     if _link_target(plugin_dir) is not None:
@@ -116,6 +135,17 @@ def install_plugin(project):
     os.makedirs(plugin_dir, exist_ok=True)
     _link_dir(os.path.join(plugin_dir, 'Source'), os.path.join(PLUGIN_SRC, 'Source'))
     _link_file(os.path.join(plugin_dir, UPLUGIN), os.path.join(PLUGIN_SRC, UPLUGIN))
+
+
+def uninstall_rule(rules_dir):
+    dest = os.path.join(os.path.abspath(os.path.expanduser(rules_dir)), RULE_NAME)
+    if not os.path.isfile(dest):
+        print('[skip]    %s 不存在' % dest)
+    elif _read(dest) != _read(RULE_SRC):
+        print('[skip]    %s 已被修改，未删除' % dest)
+    else:
+        os.unlink(dest)
+        print('[remove]  %s' % dest)
 
 
 def uninstall_skill(skills_dir):
@@ -180,18 +210,26 @@ def _ask(prompt):
 def main():
     parser = argparse.ArgumentParser(description='安装 ue-editor Skill 与 AgentTools 插件（链接方式）')
     parser.add_argument('--skills', action='append', default=[], help='Agent 的 Skill 目录，如 ~/.codebuddy/skills，可多次指定')
+    parser.add_argument('--rules', action='append', default=[], help='Agent 的规则目录，如 ~/.codebuddy/rules，可多次指定')
     parser.add_argument('--project', action='append', default=[], help='UE 工程目录或 .uproject 路径，可多次指定')
-    parser.add_argument('--uninstall', action='store_true', help='移除本仓库创建的链接与插件目录')
+    parser.add_argument('--uninstall', action='store_true', help='移除本仓库创建的链接、规则与插件目录')
     args = parser.parse_args()
 
-    if not args.skills and not args.project:
+    if not args.skills and not args.rules and not args.project:
         args.skills = _ask('输入 Agent 的 Skill 目录')
+        args.rules = _ask('输入 Agent 的规则目录')
         args.project = _ask('输入 UE 工程目录或 .uproject 路径')
 
     failed = False
     for skills_dir in args.skills:
         try:
             (uninstall_skill if args.uninstall else install_skill)(skills_dir)
+        except Exception as e:
+            failed = True
+            print('[error]   %s' % e)
+    for rules_dir in args.rules:
+        try:
+            (uninstall_rule if args.uninstall else install_rule)(rules_dir)
         except Exception as e:
             failed = True
             print('[error]   %s' % e)

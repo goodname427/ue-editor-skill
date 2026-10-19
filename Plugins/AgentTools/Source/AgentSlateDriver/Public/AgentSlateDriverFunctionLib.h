@@ -93,21 +93,24 @@ public:
 	 * 点击命中 Locator 的控件中心
 	 * @param MatchIndex 多个命中时取第几个（从 0 开始）
 	 * @param ExpectHit 非空时须唯一匹配可见控件；实际发送前校验命中/捕获路径包含该控件
-	 * @return JSON对象，包含 success, match_count, target, pos, hit；断言模式另含 request_id
+	 * @param bCheckTarget 未给 ExpectHit 时，校验光标下的最上层控件是目标或其子节点；被遮挡或 HitTestInvisible 时直接判失败，不发按下
+	 * @return JSON对象，包含 success, match_count, target, pos, hit；校验模式另含 request_id
 	 */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
-	static FString ClickWidget(const FString& Locator, const FString& WindowFilter, int32 MatchIndex = 0, const FString& Button = TEXT("Left"), bool bDoubleClick = false, const FString& ExpectHit = TEXT(""));
+	static FString ClickWidget(const FString& Locator, const FString& WindowFilter, int32 MatchIndex = 0, const FString& Button = TEXT("Left"), bool bDoubleClick = false, const FString& ExpectHit = TEXT(""), bool bCheckTarget = false);
 
-	/** 最近 64 次断言点击结果；pending=true 未执行，false 时包含 success 与 clicks_sent */
+	/** 最近 64 次输入校验结果；pending=true 未执行，false 时包含 success 与 clicks_sent（或文本回读） */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
 	static FString GetInputResult(int32 RequestId);
 
 	/**
 	 * 在桌面坐标处滚动滚轮
 	 * @param Delta 滚动量，正数向上
+	 * @param Frames 滚动后等几帧再回读（默认 8，覆盖平滑滚动）
+	 * @return JSON对象，包含 success, pos, hit, handled, moved；moved=false 表示光标下控件没有移动
 	 */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
-	static FString ScrollAt(float X, float Y, float Delta);
+	static FString ScrollAt(float X, float Y, float Delta, int32 Frames = 8);
 
 	// ==================== 键盘输入 ====================
 
@@ -123,4 +126,14 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
 	static FString TypeText(const FString& Text);
+
+	/**
+	 * 原子文本输入：聚焦命中的输入框（本身不是输入框时取其中第一个可编辑控件）→ 全选 → 输入 →
+	 * 可选提交 → 等两帧回读，防止数字类输入框把新值追加到旧值后面并被业务上限截断。
+	 * @param bReplace 是否先全选替换旧内容（默认替换）；false 时追加
+	 * @param bCommit 是否按 Enter 提交（默认提交，触发 OnTextCommitted）
+	 * @return JSON对象，包含 success, match_count, target, editable, request_id；结果用 GetInputResult 回读
+	 */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
+	static FString InputText(const FString& Locator, const FString& WindowFilter, int32 MatchIndex, const FString& Text, bool bReplace = true, bool bCommit = true);
 };

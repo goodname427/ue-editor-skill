@@ -106,9 +106,10 @@ print(lib.click_widget('Btn_Confirm', '', 0, 'Left', False))
   - `match_index` (`int`) — 多个命中时取第几个
   - `button` (`str`) — `Left` / `Right` / `Middle`
   - `double_click` (`bool`)
-  - `expect_hit` (`str`，默认空) — 唯一可见预期控件的 Locator
-- **返回**: `str` — JSON 对象，包含 `success`, `match_count`, `target`, `pos`, `hit`；断言模式另含 `request_id`。
-- **注意**: 此处 `hit` 是排队前快照，可能是目标合法子节点，不一致不直接证明遮挡；实际路由还可能受捕获/预处理器影响。非空 `expect_hit` 在下一帧发送前与悬停更新后校验实际路径包含已解析的控件身份，失败不再发按下。业务效果仍需状态/日志确认。
+  - `expect_hit` (`str`，默认空) — 唯一可见预期控件的 Locator，严格断言：实际命中路径须包含它
+  - `check_target` (`bool`，默认 false) — 未给 `expect_hit` 时校验"光标下最上层控件是目标本身或其子节点"。目标被抽屉/弹窗盖住、或目标是 HitTestInvisible 的文字（点击会穿透到别处）时判失败，不发送按下
+- **返回**: `str` — JSON 对象，包含 `success`, `match_count`, `target`, `pos`, `hit`；校验模式另含 `request_id`。
+- **注意**: 此处 `hit` 是排队前快照，可能是目标合法子节点，不一致不直接证明遮挡；实际路由还可能受捕获/预处理器影响。校验在下一帧发送前与悬停更新后按控件身份执行，失败不再发按下；结果用 `GetInputResult` 读回。业务效果仍需状态/日志确认。
 
 ### ClickAt
 
@@ -123,20 +124,21 @@ print(lib.click_at(1520.0, 640.0, 'Right', False))
 
 ### GetInputResult
 
-`lib.get_input_result(request_id)` 回读最近 64 次断言点击的结果。`pending=true` 为未完成，完成包含 `success`、`clicks_sent` 与实际 `hit`；首次失败可为 0 次，双击第二次失败可为 1 次。调用方不得因失败自动重放；模态回调可能使结果长时间 pending。
+`lib.get_input_result(request_id)` 回读最近 64 次输入结果（点击校验、滚动回读、文本回读共用）。`pending=true` 为未完成，完成包含 `success`、`clicks_sent` 与实际 `hit`（文本输入为 `expected`/`actual`，滚动为 `handled`/`moved`）；首次失败可为 0 次，双击第二次失败可为 1 次。调用方不得因失败自动重放；模态回调可能使结果长时间 pending。滚动回读要等固定帧数，CLI 的 `--timeout` 要大于该等待。
 
 `ui click --expect-hit=<Locator>` 会输出 `[input-request]`，CLI 的 exec/sequence 自动跨帧回读并在失败时返回 `InputAssertionFailed` / `InputWaitTimeout`。项目直接调 API 时须自行用只读等待与 `GetInputResult` 确认，或使用 ui Lib；不能把排队成功视作断言完成。
 
 ### ScrollAt
 
-在桌面坐标处滚动滚轮（作用于该位置下的控件，如列表、细节面板）。
+在桌面坐标处滚动滚轮（作用于该位置下的控件，如列表、细节面板），并在几帧后回读光标下内容是否真的移动。
 
 ```python
 print(lib.scroll_at(1520.0, 640.0, -3.0))
 ```
 
-- **参数**: `x` (`float`), `y` (`float`), `delta` (`float`) — 正数向上
-- **返回**: `str` — JSON 对象，包含 `success`, `pos`, `hit`
+- **参数**: `x` (`float`), `y` (`float`), `delta` (`float`) — 正数向上；`frames` (`int`，默认 8) — 滚动后等几帧再回读，覆盖平滑滚动
+- **返回**: `str` — JSON 对象，包含 `success`, `pos`, `hit`（排队前）、`request_id`。结果用 `GetInputResult` 读回，含 `handled`（是否有控件消费滚轮）、`moved`（光标下最上层控件的几何是否变化）、`hit`（回读时）、`message`
+- **判读**：`handled=false` 说明该点没有可滚动控件接收滚轮；`handled=true, moved=false` 可能是已到边界，也可能只被外围面板接管。两者都不等于"滚轮没送达"，但都不能当作滚动生效；需要确认位置时读滚动容器自身的偏移或截图
 
 ### PressKey
 
@@ -160,7 +162,21 @@ print(lib.type_text('MainMenu'))
 ```
 
 - **参数**: `text` (`str`)
-- **返回**: `str` — JSON 对象，包含 `success`, `focus`（排队时的焦点）
+- **返回**: `str` — JSON 对象，包含 `success`, `focus`（排队时的焦点，不是输入完成后的）
+- **注意**: 只追加，不清空旧内容。数字/搜索框把新值接在旧值后面（`1` + `100000` → `1100000`）是常见坑；要写入确定的值用 `InputText`
+
+### InputText
+
+原子文本输入：聚焦 → 全选 → 输入 → 可选提交 → 等两帧回读。
+
+```python
+print(lib.input_text('name=EditableTextBox_Num', '', 0, '5', True, True))
+```
+
+- **参数**: `locator` (`str`), `window_filter` (`str`), `match_index` (`int`), `text` (`str`), `replace` (`bool`，默认 true，先全选替换旧内容), `commit` (`bool`，默认 true，按 Enter 触发 OnTextCommitted)
+- **返回**: `str` — JSON 对象，包含 `success`, `match_count`, `target`, `editable`（实际写入的输入框）, `request_id`
+- **回读**: 用 `GetInputResult` 读结果，含 `expected` / `actual`。实际值不等于请求值即失败 —— 业务侧改值、被上限截断、格式化成 `1,000` 都会显形；提交后控件消失时 `actual = (target destroyed)` 视为通过
+- **注意**: 命中容器（如 UMG 的 `EditableTextBox` 外层）时会自动取其中第一个可编辑控件。不用 `SetText` 写值：那样不触发 OnTextChanged，业务侧收不到修改
 
 ## 典型流程
 
@@ -173,4 +189,4 @@ lib.type_text('WBP_Foo')
 lib.press_key('Enter', False, False, False)
 ```
 
-输入与提交可用：`exec --lib ui type WBP_Foo --focus="hint~=Search" --enter`（不自动全选旧文字）。排队顺序只保证按下/字符的顺序，按键抬起独立延迟；依赖前一步抬起或业务完成的操作拆成多次调用，用 `--wait-until` 确认。执行后用 `ui focus` / `ui tree` 或截图确认结果。
+输入与提交可用：`exec --lib ui type WBP_Foo --focus="hint~=Search" --enter`。带 `--focus` 的 `ui type` 走 `InputText`：先全选替换旧内容、提交、回读，实际值不符即失败；要保留旧内容追加用 `--append`。排队顺序只保证按下/字符的顺序，按键抬起独立延迟；依赖前一步抬起或业务完成的操作拆成多次调用，用 `--wait-until` 确认。执行后用 `ui focus` / `ui tree` 或截图确认结果。

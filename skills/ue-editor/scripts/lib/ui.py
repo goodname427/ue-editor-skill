@@ -6,10 +6,10 @@
   exec --lib ui tree [根Locator] [--index=N] [--depth=N] [--window=标题] [--full] [--hidden] [--max=N]
   exec --lib ui find <Locator> [--window=标题] [--hidden]         隐藏查询结果仅作诊断，不复用下标/几何
   exec --lib ui focus                                           当前键盘焦点
-  exec --lib ui click <Locator> [--index=N] [--right] [--double] [--expect-hit=<Locator>]    或 --at=x,y；断言必须唯一命中
-  exec --lib ui type <文本> [--focus=<Locator>] [--index=N] [--enter]
+  exec --lib ui click <Locator> [--index=N] [--right] [--double] [--expect-hit=<Locator>] [--no-check]    或 --at=x,y
+  exec --lib ui type <文本> [--focus=<Locator>] [--index=N] [--enter] [--append]
   exec --lib ui key <键名> [--ctrl] [--shift] [--alt] [--focus=<Locator>] [--index=N]    键名如 Escape / Enter / F5 / A
-  exec --lib ui scroll <Locator> [--index=N] [--delta=-3]        或 --at=x,y；delta 正数向上
+  exec --lib ui scroll <Locator> [--index=N] [--delta=-3] [--frames=N]        或 --at=x,y；delta 正数向上
 
 - 坐标为桌面像素 [x,y,w,h]，可原样给 `screenshot --rect=x,y,w,h`（坐标可能为负，参数一律写成 --k=v）。
 - 输入在下一帧执行：本次输出的焦点、状态都是输入执行前的。要在同一次调用里确认效果，加 CLI 的 --wait-until，
@@ -17,6 +17,13 @@
 - tree 默认精简：只列有文字/提示/Tag、可点击/可聚焦的控件和 UserWidget 边界，按钮的唯一文字子节点并入按钮行；
   看纯布局/图片控件用 --full，或直接 find name=控件名。
 - 输入文本前用 --focus 直接把焦点设到输入框（如 --focus="hint~=Search"），比先点击再输入可靠。
+- 带 --focus 的 type 是原子替换：全选旧内容 → 输入 → 加 --enter 时提交 → 回读，实际值不一致直接判失败；
+  数字/搜索框把新值追加到旧值后面（1→1100000）时不会再静默成功。只在提交时同步业务的框必须加 --enter；
+  被业务上下限截断时 actual 是截断后的值。保留旧内容用 --append。
+- click 默认校验光标下最上层控件是目标或其子节点：目标被抽屉/弹窗盖住、或文字是 HitTestInvisible 时会失败而不是点到别处；
+  --expect-hit 另有严格断言（须唯一命中）。确实要点击穿透时用 --no-check。
+- scroll 返回 handled / moved：handled 是事件路径上有没有控件处理滚轮，moved 才是内容是否移动；
+  容器 ConsumeMouseWheel=Never 时 handled 可能为 true 而 moved=false。不能只看 queued。
 - --window 只匹配独立窗口的标题；停靠面板都在主窗口里，用根 Locator 定位（如 tree "type=SContentBrowser" --index=0）。
 
 每行控件：名称<类型:UMG类> [x,y,w,h] #tag "文本" hint="输入框提示" label="无文字按钮的名称（折叠文字或 tooltip）" vis=.. owner=所属UMG @click *focus ^hover !disabled
@@ -153,31 +160,41 @@ elif cmd == 'click':
     if OPTS.get('at'):
         r = parse(lib.click_at(*point(OPTS['at']) + (button, double) + expected))
     else:
-        r = parse(lib.click_widget(ARGS[1], window, index, button, double, *expected))
+        r = parse(lib.click_widget(ARGS[1], window, index, button, double, OPTS.get('expect_hit', ''), not OPTS.get('no_check')))
         print('target (%d matched): %s' % (r['match_count'], line(r['target'])))
     print('queued %s click at (%d,%d), topmost there: %s' % (button.lower(), r['pos'][0], r['pos'][1], line(r['hit'])))
-    if expected:
+    if r.get('request_id'):
         print('[input-request] %d' % r['request_id'])
 
 elif cmd in ('type', 'key'):
     if len(ARGS) < 2:
         raise RuntimeError(__doc__)
     steps = []
-    if OPTS.get('focus'):
-        r = parse(lib.focus_widget(OPTS['focus'], window, index))
-        steps.append('focus %s' % line(r['target']))
-    if cmd == 'type':
-        r = parse(lib.type_text(ARGS[1]))
-        steps.append('type %r' % ARGS[1])
-        if OPTS.get('enter'):
-            parse(lib.press_key('Enter', False, False, False))
-            steps.append('Enter')
+    if cmd == 'type' and OPTS.get('focus'):
+        # 焦点、全选、输入、提交、回读在同一次调用里完成，结果由 CLI 跨帧回读
+        r = parse(lib.input_text(OPTS['focus'], window, index, ARGS[1], not OPTS.get('append'), bool(OPTS.get('enter'))))
+        steps.append('input %r into %s' % (ARGS[1], line(r['editable'])))
+        print('queued: ' + ' -> '.join(steps))
+        if r.get('request_id'):
+            print('[input-request] %d' % r['request_id'])
+    elif cmd == 'type' and OPTS.get('append'):
+        raise RuntimeError('--append needs --focus: 追加输入要先确定输入框，否则不知道往哪里写')
     else:
-        r = parse(lib.press_key(ARGS[1], bool(OPTS.get('ctrl')), bool(OPTS.get('shift')), bool(OPTS.get('alt'))))
-        steps.append('+'.join([m for m in ('ctrl', 'shift', 'alt') if OPTS.get(m)] + [ARGS[1]]))
-    print('queued: ' + ' -> '.join(steps))
-    if not OPTS.get('focus'):
-        print('focus before input: ' + line(r['focus']))
+        if OPTS.get('focus'):
+            r = parse(lib.focus_widget(OPTS['focus'], window, index))
+            steps.append('focus %s' % line(r['target']))
+        if cmd == 'type':
+            r = parse(lib.type_text(ARGS[1]))
+            steps.append('type %r' % ARGS[1])
+            if OPTS.get('enter'):
+                parse(lib.press_key('Enter', False, False, False))
+                steps.append('Enter')
+        else:
+            r = parse(lib.press_key(ARGS[1], bool(OPTS.get('ctrl')), bool(OPTS.get('shift')), bool(OPTS.get('alt'))))
+            steps.append('+'.join([m for m in ('ctrl', 'shift', 'alt') if OPTS.get(m)] + [ARGS[1]]))
+        print('queued: ' + ' -> '.join(steps))
+        if not OPTS.get('focus'):
+            print('focus before input: ' + line(r['focus']))
 
 elif cmd == 'scroll':
     need_target('scroll')
@@ -188,8 +205,10 @@ elif cmd == 'scroll':
         if index >= len(matches):
             raise RuntimeError('no widget at index %d (%d matched)' % (index, len(matches)))
         x, y = center(matches[index])
-    r = parse(lib.scroll_at(x, y, float(OPTS.get('delta', -3))))
+    r = parse(lib.scroll_at(x, y, float(OPTS.get('delta', -3)), int(OPTS.get('frames', 8))))
     print('queued scroll %s at (%d,%d), topmost there: %s' % (OPTS.get('delta', -3), x, y, line(r['hit'])))
+    if r.get('request_id'):
+        print('[input-request] %d' % r['request_id'])
 
 else:
     raise RuntimeError(__doc__)
