@@ -2,25 +2,25 @@
 编辑器界面查看与操作，编辑器面板、弹出菜单与 PIE 界面通用。依赖 AgentTools 的 AgentSlateDriverFunctionLib，Locator 语法见 references/slate_driver.md。
 兜底手段：能用 Python API 脚本完成的操作不要走这里（见 SKILL.md「选择方式」）。
 
-  exec --lib ui windows                                         列出可见窗口
-  exec --lib ui tree [根Locator] [--index=N] [--depth=N] [--window=标题] [--full] [--hidden] [--max=N]
-  exec --lib ui find <Locator> [--window=标题] [--hidden]         隐藏查询结果仅作诊断，不复用下标/几何
-  exec --lib ui at <x,y>                                        坐标处最上层控件
-  exec --lib ui focus                                           当前键盘焦点
-  exec --lib ui click <Locator> [--index=N] [--right] [--double] [--hold=秒] [--expect-hit=<Locator>] [--no-check]    或 --at=x,y
-  exec --lib ui type <文本> [--focus=<Locator>] [--index=N] [--enter] [--append]
-  exec --lib ui key <键名> [--ctrl] [--shift] [--alt] [--hold=秒] [--focus=<Locator>] [--index=N]    键名如 Escape / Enter / F5 / A
-  exec --lib ui scroll <Locator> [--index=N] [--delta=-3] [--frames=8]        或 --at=x,y；delta 正数向上
+  exec --action ui windows                                         列出可见窗口
+  exec --action ui tree [根Locator] [--index=N] [--depth=N] [--window=标题] [--full] [--hidden] [--max=N]
+  exec --action ui find <Locator> [--window=标题] [--hidden]         隐藏查询结果仅作诊断，不复用下标/几何
+  exec --action ui at <x,y>                                        坐标处最上层控件
+  exec --action ui focus                                           当前键盘焦点
+  exec --action ui click <Locator> [--index=N] [--right] [--double] [--hold=秒] [--expect-hit=<Locator>] [--no-check]    或 --at=x,y
+  exec --action ui type <文本> [--focus=<Locator>] [--index=N] [--enter] [--append]
+  exec --action ui key <键名> [--ctrl] [--shift] [--alt] [--hold=秒] [--focus=<Locator>] [--index=N]    键名如 Escape / Enter / F5 / A
+  exec --action ui scroll <Locator> [--index=N] [--delta=-3] [--frames=8]        或 --at=x,y；delta 正数向上
   按住 / 抬起 / 移动：
-  exec --lib ui keydown <键名> [--ctrl] [--shift] [--alt] [--max-hold=30]           按住不放，直到 keyup / release；--max-hold 秒后自动抬起
-  exec --lib ui keyup <键名>
-  exec --lib ui mousedown <Locator> [--index=N] [--right|--middle] [--max-hold=30]   或 --at=x,y；控件模式校验落点未被遮挡
-  exec --lib ui mouseup [--right|--middle]
-  exec --lib ui move <Locator> [--index=N] [--frames=1]                      或 --at=x,y；按着鼠标键时就是拖动
-  exec --lib ui drag <Locator> --to=x,y [--frames=20] [--right|--middle]     或 --at=x,y / --to-target=<Locator>
-  exec --lib ui release                                                       取消排队中的输入并抬起全部按键
+  exec --action ui keydown <键名> [--ctrl] [--shift] [--alt] [--max-hold=30]           按住不放，直到 keyup / release；--max-hold 秒后自动抬起
+  exec --action ui keyup <键名>
+  exec --action ui mousedown <Locator> [--index=N] [--right|--middle] [--max-hold=30]   或 --at=x,y；控件模式校验落点未被遮挡
+  exec --action ui mouseup [--right|--middle]
+  exec --action ui move <Locator> [--index=N] [--frames=1]                      或 --at=x,y；按着鼠标键时就是拖动
+  exec --action ui drag <Locator> --to=x,y [--frames=20] [--right|--middle]     或 --at=x,y / --to-target=<Locator>
+  exec --action ui release                                                       取消排队中的输入并抬起全部按键
 
-所有输入都由编辑器侧模块 ue_input（scripts/editor/ue_input.py）拼装，排在同一条时间线上：前一步完成才执行下一步，
+所有输入都由 Skill lib 的 ue_input（scripts/lib/ue_input.py）拼装，排在同一条时间线上：前一步完成才执行下一步，
 某步失败时取消其后所有步骤；CLI 在脚本执行完后按顺序等每一步的结果。项目脚本也直接 import ue_input，不要自己再拼。
 
 - 坐标为桌面像素 [x,y,w,h]，可原样给 `screenshot --rect=x,y,w,h`（坐标可能为负，参数一律写成 --k=v）。
@@ -37,45 +37,14 @@
 - scroll 返回 handled / moved：handled 是事件路径上有没有控件处理滚轮，moved 才是内容是否移动；
   容器 ConsumeMouseWheel=Never 时 handled 可能为 true 而 moved=false。不能只看 queued。
 - 长按：click / key 加 --hold=秒（按住这么久再抬起，命令在抬起后才返回）。按住直到某个条件成立：
-  keydown/mousedown 加 CLI 的 --wait-until 等条件，再 keyup/mouseup；键盘有现成清单 sequence --lib hold-until。
+  keydown/mousedown 加 CLI 的 --wait-until 等条件，再 keyup/mouseup；键盘有现成清单 sequence --action hold-until。
   中途失败也不会一直按着：--max-hold 秒（默认 30）后自动抬起，或手动 ui release。
 - --window 只匹配独立窗口的标题；停靠面板都在主窗口里，用根 Locator 定位（如 tree "type=SContentBrowser" --index=0）。
 
 每行控件：名称<类型:UMG类> [x,y,w,h] #tag "文本" hint="输入框提示" label="无文字按钮的名称（折叠文字或 tooltip）" vis=.. owner=所属UMG @click *focus ^hover !disabled
 """
 import ue_input
-from ue_input import LIB as lib, parse
-
-MARKS = (('interactable', '@click'), ('focus', '*focus'), ('hover', '^hover'))
-
-
-def line(n, prefix=''):
-    if not n:
-        return '(none)'
-    kind = n['type'] + (':' + n['class'] if n.get('class') else '')
-    parts = [prefix + n.get('name', '') + '<' + kind + '>', '[%d,%d,%d,%d]' % tuple(n['rect'])]
-    if n.get('tag'):
-        parts.append('#' + n['tag'])
-    if n.get('text'):
-        parts.append('"' + n['text'].replace('\n', '\\n') + '"')
-    if n.get('hint'):
-        parts.append('hint="%s"' % n['hint'])
-    if n.get('label'):
-        parts.append('label="%s"' % n['label'])
-    if n.get('vis'):
-        parts.append('vis=' + n['vis'])
-    if n.get('owner') and n.get('owner') != n.get('name'):
-        parts.append('owner=' + n['owner'])
-    parts.extend(mark for key, mark in MARKS if n.get(key))
-    if n.get('enabled') is False:
-        parts.append('!disabled')
-    if n.get('hidden_by'):
-        parts.append('hidden_by=' + n['hidden_by'])
-    if n.get('geometry_valid') is False:
-        parts.append('!geometry')
-    if n.get('query_only'):
-        parts.append('!query-only')
-    return ' '.join(parts)
+from ue_input import LIB as lib, parse, describe as line
 
 
 def fold_text_children(nodes):

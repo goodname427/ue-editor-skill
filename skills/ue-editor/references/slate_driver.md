@@ -2,7 +2,7 @@
 
 > 本文档收录 `UAgentSlateDriverFunctionLib` 提供的 Slate 层操控接口：读取控件树、查找控件、设置焦点、合成鼠标/键盘输入。
 > 编辑器面板、资产编辑器、弹窗菜单、PIE 视口内的 UMG 使用同一套接口；后台输入边界见 [ui_verify.md](ui_verify.md#pie-游戏界面)。所有函数返回 JSON 字符串。
-> 日常查看与操作优先用 `exec --lib ui ...`（输出精简文本，见 `scripts/lib/ui.py` docstring）；脚本里做界面输入用 `import ue_input`，查询可以直接调用本库。
+> 日常查看与操作优先用 `exec --action ui ...`（输出精简文本，见 `scripts/lib/ui.py` docstring）；脚本里做界面输入用 `import ue_input`，查询可以直接调用本库。
 
 ## AgentSlateDriverFunctionLib
 
@@ -91,7 +91,7 @@ print(lib.get_keyboard_focus())
 
 ## 输入：C++ 只给原子步骤，组合在 `ue_input`
 
-C++ 只提供下表这些原子步骤，**点击、长按、按键、拖动、滚动回读、文本输入回读都在编辑器侧 Python 模块 `scripts/editor/ue_input.py` 里拼装**。`ui` Lib 和项目脚本都 `import ue_input`，不要在别处再拼一遍，也不要直接调用下表的接口去重复实现这些组合。CLI 每次执行前都会把 `scripts/editor` 加进 `sys.path`，并清掉 `ue_input` 的模块缓存，所以 `git pull` 后不用重启编辑器。
+C++ 只提供下表这些原子步骤，**点击、长按、按键、拖动、滚动回读、文本输入回读都在 Skill lib 的 `scripts/lib/ue_input.py` 里拼装**。`ui` 入口和项目脚本都 `import ue_input`，不要在别处再拼一遍，也不要直接调用下表的接口去重复实现这些组合。CLI 每次执行前都会把 `scripts/lib` 加进 `sys.path` 并清掉其中模块的缓存，所以 `git pull` 后不用重启编辑器。
 
 | 原子步骤 | 作用 | 结果字段 |
 |---|---|---|
@@ -123,7 +123,7 @@ C++ 只提供下表这些原子步骤，**点击、长按、按键、拖动、�
 | `scroll(x, y, delta, frames=8)` | 排队前先用 `widget_at` 记下落点控件 → `mouse_wheel` → `wait_input(0, frames)` → 回读：落点控件的 `type` / `name` / `rect` 变了才算 `moved` |
 | `input_text(locator, text, window, index, replace=True, commit=False)` | `focus_widget` → `select_all_text`（replace 时）→ `type_text` →（commit 时）`key('Enter')` → `wait_input(0, 2)` → 回读文字，不等于预期就失败。追加模式的预期值是旧值加新文字。控件已消失时记为 `(target destroyed)`，视为通过 |
 
-模块还提供查询辅助：`find`、`match`、`center`、`widget_at`、`read_text`，以及 `parse`（解析 JSON，`success=false` 时抛异常）。
+模块还提供查询辅助：`find`、`find_one`、`match`、`center`、`widget_at`、`read_text`、`describe`（控件节点的一行文字，`ui` 的输出就用它），以及 `parse`（解析 JSON，`success=false` 时抛异常）。
 
 **与 CLI 的约定**：每个原子步骤打印一行 `[input-request] <id> [秒]`；需要回读的组合再打印一行 `[input-check] <表达式>`，这个表达式必须返回含 `ok` 字段的 JSON 字符串。`exec` / `sequence` 执行完脚本后，按输出顺序等每个请求完成；某个检查表达式会在它之前的请求都完成后才求值。任一步失败时报 `InputAssertionFailed`，等待超时报 `InputWaitTimeout`。所以调用方不要自己 sleep 或轮询。在 CLI 之外直接调用 C++ 时，要自己用 `get_input_result` 确认结果，不能把排队成功当作已经生效。
 

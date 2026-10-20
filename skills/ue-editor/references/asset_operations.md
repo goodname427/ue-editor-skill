@@ -83,7 +83,7 @@ result = unreal.EditorAssetLibrary.rename_asset(source_asset_path, destination_a
   - `source_asset_path` (`str`)
   - `destination_asset_path` (`str`)
 - **返回**: `bool`
-- **提示**: 批量移动、移动前查引用方、列旧路径残留的 ObjectRedirector 用 `exec --lib asset_move check/move/redirectors`；手法与 P4 历史保留见 [widget_blueprint_edit.md](widget_blueprint_edit.md#移动或改名资产)。
+- **提示**: 批量移动、移动前查引用方、列旧路径残留的 ObjectRedirector 用 `exec --action asset_move check/move/redirectors`；手法与 P4 历史保留见 [widget_blueprint_edit.md](widget_blueprint_edit.md#移动或改名资产)。
 
 ### make_directory
 

@@ -1,86 +1,57 @@
 # Widget 蓝图写操作流程
 
-> 本文档收录通过脚本修改 Widget 蓝图的已验证流程。读写组合都在编辑器侧模块 `ue_wbp`，函数一览见 [widget_blueprint_info.md](widget_blueprint_info.md)。
+> 本文档收录通过脚本修改 Widget 蓝图的已验证流程。读写组合都在 Skill lib 的 `ue_wbp`，函数一览见 [widget_blueprint_info.md](widget_blueprint_info.md)。
 > 多行脚本写成 `.py` 后用 `ue_cli.py exec --file <path>` 执行。
 
 ## 通用约定
 
 - **改前签出**：`.uasset` 在版本库里通常是独占签出，改前先签出（P4：`p4 edit -c <CL> <file>`）；只读文件 `save_asset` 会失败或弹窗。
 - **改前先读**：用 `ue_wbp.widgets(path)`（或 `wbp_edit list`）确认控件名，再按名字操作。
-- **改后收尾**：`BlueprintEditorLibrary.compile_blueprint(bp)` → `EditorAssetLibrary.save_asset(path, only_if_is_dirty=False)`；脚本外可直接 `ue_cli.py exec --lib wbp_edit save <路径>...`。
-- **项目收尾步骤**：工程若有依赖蓝图结构的生成步骤（如脚本层类型声明），在项目 Reference / Lib 里约定并在保存后执行，本 Skill 不内置。
+- **改后收尾**：`ue_wbp.save(path)`（编译 + 保存）；脚本外可直接 `ue_cli.py exec --action wbp_edit save <路径>...`。
+- **项目收尾步骤**：工程若有依赖蓝图结构的生成步骤（如脚本层类型声明），在项目 actions / references 里约定并在保存后执行，本 Skill 不内置。
 
-## 优先用 wbp_edit Lib
+## 优先用 wbp_edit 入口
 
-改名、勾变量、加控件、换控件、移除控件用 `exec --lib wbp_edit ...`，用法见脚本 docstring；默认改完即编译保存（`--no-save` 可关）：
+改名、勾变量、加控件、换控件、移除控件用 `exec --action wbp_edit ...`，用法见脚本 docstring；默认改完即编译保存（`--no-save` 可关）：
 
 ```bash
-exec --lib wbp_edit list  /Game/UI/XXX/WBP_Foo
-exec --lib wbp_edit rename /Game/UI/XXX/WBP_Foo ScrollBox_173 ScrollView_List
-exec --lib wbp_edit set   /Game/UI/XXX/WBP_Foo ScrollView_List bIsVariable=True Visibility=Collapsed
-exec --lib wbp_edit set   /Game/UI/XXX/WBP_Foo ScrollView_List ZOrder=3 --slot              # 改它所在插槽的属性
-exec --lib wbp_edit add   /Game/UI/XXX/WBP_Foo CanvasPanel_Root Btn_Confirm Button --text=确定 --copy=Btn_Cancel --anchor=0,0,0,0 --offset=100,200,160,48 --align=0.5,0.5
-exec --lib wbp_edit replace /Game/UI/XXX/WBP_Foo BP_Child /Game/UI/XXX/WBP_Child2   # 默认沿用旧控件的槽位与变量状态
-exec --lib wbp_edit remove /Game/UI/XXX/WBP_Foo Btn_Confirm
+exec --action wbp_edit list  /Game/UI/XXX/WBP_Foo
+exec --action wbp_edit rename /Game/UI/XXX/WBP_Foo ScrollBox_173 ScrollView_List
+exec --action wbp_edit set   /Game/UI/XXX/WBP_Foo ScrollView_List bIsVariable=True Visibility=Collapsed
+exec --action wbp_edit set   /Game/UI/XXX/WBP_Foo ScrollView_List ZOrder=3 --slot              # 改它所在插槽的属性
+exec --action wbp_edit add   /Game/UI/XXX/WBP_Foo CanvasPanel_Root Btn_Confirm Button --text=确定 --copy=Btn_Cancel --anchor=0,0,0,0 --offset=100,200,160,48 --align=0.5,0.5
+exec --action wbp_edit replace /Game/UI/XXX/WBP_Foo BP_Child /Game/UI/XXX/WBP_Child2   # 默认沿用旧控件的槽位与变量状态
+exec --action wbp_edit remove /Game/UI/XXX/WBP_Foo Btn_Confirm
 ```
 
-Lib 覆盖不到的场景（复制属性以外的样式改造、批量建树、改父类等）按下面手写脚本，用到的手法与接口相同。
+`wbp_edit` 覆盖不到的场景（批量建树、复制属性以外的样式改造等）在脚本里直接用 `ue_wbp`，它就是 `wbp_edit` 背后的实现；不要再手写一份 `new_object` / `add_child_to_*` / 移出 Transient 的流程。
 
-## 取 WidgetTree 与控件对象
-
-```python
-import unreal
-P = '/Game/UI/XXX/WBP_Foo'          # 包路径
-N = 'WBP_Foo'                       # 资产名
-bp = unreal.EditorAssetLibrary.load_asset(P)
-tree = unreal.find_object(None, P + '.' + N + ':WidgetTree')
-panel = unreal.find_object(None, P + '.' + N + ':WidgetTree.CanvasPanel_Root')
-```
-
-- 必须先 `load_asset`，否则 `find_object` 返回 `None`。
-- 控件都挂在 WidgetTree 下平铺成子对象：任意层级的控件路径都是 `...:WidgetTree.<控件名>`，不用带父控件名。
-
-## 改名并勾选"是变量"
+## 脚本里改控件
 
 ```python
 import ue_wbp
+P = '/Game/UI/XXX/WBP_Foo'
 print(ue_wbp.rename_widget(P, 'ScrollBox_173', 'ScrollView_List'))
 print(ue_wbp.set_prop(P, 'ScrollView_List', 'bIsVariable', 'True'))     # 返回回读值 'True'
+ue_wbp.add_widget(P, 'CanvasPanel_Root', 'Btn_Confirm', 'Button', text='确定', copy_from='Btn_Cancel',
+                  slot={'anchor': (0, 0, 0, 0), 'offset': (100, 200, 160, 48), 'align': (0.5, 0.5)})
+ue_wbp.add_widget(P, 'HBox_Bar', 'Img_Icon', 'Image', var=False, slot={'padding': (4, 0, 4, 0), 'size': (1, 'fill'), 'valign': 'center'})
+ue_wbp.replace_widget(P, 'BP_Child', '/Game/UI/XXX/WBP_Child2')      # 沿用旧插槽与"是变量"
+ue_wbp.remove_widget(P, 'Btn_Old')
+print(ue_wbp.props(P, 'Btn_Confirm', slot=True)['LayoutData'])
+if not ue_wbp.save(P):
+    raise RuntimeError('save failed; check out the asset first')
 ```
 
-- 改名同步变量引用、属性/动画/导航绑定；新名字与控件树里任何控件重名、含空格、以数字开头时直接报错。不要用 Python 的 `widget.rename(...)` 改控件名：它不同步这些引用，撞名时引擎会直接 fatal。
-- `set_prop` 的值按 UE 文本格式给（`True`、`Collapsed`），属性名是 C++ 属性名；写后回读，解析失败报错。批量用 `ue_wbp.set_props(P, name, {...})`，插槽属性加 `slot=True`。
-
-## 新增控件
-
-```python
-b = unreal.new_object(unreal.Button, tree, 'Btn_Confirm')
-slot = panel.add_child_to_canvas(b)                     # CanvasPanel
-# slot = hbox.add_child_to_horizontal_box(b)            # HorizontalBox，返回的 slot 设 padding/size/alignment
-# slot = vbox.add_child_to_vertical_box(b)              # VerticalBox
-layout = unreal.AnchorData()
-layout.anchors = unreal.Anchors(minimum=unreal.Vector2D(0, 0), maximum=unreal.Vector2D(0, 0))
-layout.offsets = unreal.Margin(0, 150, 1000, 600)
-layout.alignment = unreal.Vector2D(0, 0)
-slot.set_layout(layout)
-ue_wbp.set_prop(P, 'Btn_Confirm', 'bIsVariable', 'True')
-```
-
-- 子蓝图实例：类用 `unreal.EditorAssetLibrary.load_blueprint_class('/Game/.../WBP_Child')` 或 `unreal.load_class(None, '/Game/.../WBP_Child.WBP_Child_C')`。
-- 样式可从同树已有控件复制：`new.set_editor_property('widget_style', old.get_editor_property('widget_style'))`；文字控件复制 `font`；ComboBoxString 还要 `item_style` / `scroll_bar_style` / `content_padding` / `foreground_color` / `max_list_height`。
-- 没有 insert/replace API，新控件只能追加到父面板末尾；按钮等 Content 控件用 `add_child` 挂文字子控件。
-- 回读槽位用 `ue_wbp.props(P, name, slot=True)`（如 `LayoutData`、`ZOrder`、`Padding`）；也可以在 Python 侧读 `slot.get_layout()`，横/纵/Overlay 槽位读 `padding` / `size` / `horizontal_alignment` / `vertical_alignment`。
-
-## 删除或替换控件
-
-```python
-transient = unreal.find_object(None, '/Engine/Transient')
-old = unreal.find_object(None, P + '.' + N + ':WidgetTree.BP_Child')
-panel.remove_child(old)
-old.rename('BP_Child_Removed', transient)               # 腾出名字，否则同名 new_object 冲突
-new = unreal.new_object(new_cls, tree, 'BP_Child')
-panel.add_child_to_canvas(new).set_layout(layout)
-```
+- **改名**：同步变量引用、属性/动画/导航绑定；新名字与控件树里任何控件重名、含空格、以数字开头时直接报错。不要用 Python 的 `widget.rename(...)` 改控件名：它不同步这些引用，撞名时引擎会直接 fatal。
+- **改属性**：`set_prop` 的值按 UE 文本格式给（`True`、`Collapsed`），属性名是 C++ 属性名；写后回读，解析失败报错。批量用 `set_props(P, name, {...})`，插槽属性加 `slot=True`。
+- **插槽参数**：`slot` 字典见 `ue_wbp.check_slot`。CanvasPanel 用 `anchor` / `offset` / `align`（给了任一项就整体重设，没给的项按 0）；横向/纵向/Overlay 用 `padding` / `size` / `halign` / `valign`。参数在改资产之前校验，不合法时什么都不会改。
+- **"是变量"**：新建控件的 `bIsVariable` 默认值随类不同（Widget 基类是 true，多数面板和 TextBlock 显式 false），`add_widget` 总是显式写入（默认勾上，`var=False` 不勾），`replace_widget` 默认沿用旧控件。
+- **子蓝图实例**：类写蓝图路径（`/Game/.../WBP_Child`），或 UMG 类名（`Button`、项目类）。
+- **样式**：`copy_from` 从同树控件复制 `ue_wbp.STYLE_PROPS` 里两边都有的属性（`widget_style` / `font` / `item_style` / `scroll_bar_style` / `content_padding` / `foreground_color` / `max_list_height`）；文字子控件用 `text_font_from` 复制 `font`。
+- **顺序**：没有插入 API，新控件只能追加到父面板末尾；`replace_widget` 换出来的新控件也在末尾，同一父面板有多个子控件时顺序会变。
+- **移除**：控件从父面板拿掉后移到 `/Engine/Transient`（换一个没被占用的名字，同名对象已在 Transient 时引擎重命名会 fatal），这样原名可以立刻再用。
+- 需要控件对象本身（调引擎 API）时用 `ue_wbp.widget(P, name)`；任意层级的控件都平铺挂在 WidgetTree 下，路径不带父控件名。
 
 ## 改父类
 
@@ -94,7 +65,7 @@ unreal.BlueprintEditorLibrary.reparent_blueprint(bp, unreal.load_class(None, '/S
 ok = unreal.EditorAssetLibrary.rename_asset(src, dst)   # 自动修引用
 ```
 
-- 批量移动与引用检查用 `exec --lib asset_move check/move/redirectors`。
+- 批量移动与引用检查用 `exec --action asset_move check/move/redirectors`。
 - 引用方会被编辑器自动 P4 签出，期间编辑器可能无响应 1~3 分钟。执行时加 `--timeout 300`；即使返回 `Timeout` 也**不要重发**，用 `exec "print(1)"` 探测恢复后核对结果。
 - 改名后逐个 `save_asset` 引用方（`asset_move move --save-referencers`）。
 - P4 侧保留历史：对新文件 `p4 revert -k`，再 `p4 move -k -c <CL> <old> <new>`。

@@ -4,11 +4,11 @@
 
 | 需求 | 做法 |
 |------|------|
-| 看结构（控件名、文本、坐标） | `exec --lib ui tree` / `ui find` |
-| 操作（点击、输入、按键、滚动） | `exec --lib ui click` / `type` / `key` / `scroll` |
+| 看结构（控件名、文本、坐标） | `exec --action ui tree` / `ui find` |
+| 操作（点击、输入、按键、滚动） | `exec --action ui click` / `type` / `key` / `scroll` |
 | 看视觉效果（样式、遮挡、对齐） | `screenshot`，可按控件的 `rect` 截取局部 |
 
-`ui` 的完整用法见 `scripts/lib/ui.py` docstring；底层接口与 Locator 语法见 [slate_driver.md](slate_driver.md)。
+`ui` 的完整用法见 `scripts/actions/ui.py` docstring；底层接口与 Locator 语法见 [slate_driver.md](slate_driver.md)。
 
 结构确认优先控件树（精确、省 token），视觉效果再配合截图。按控件截取优先 `screenshot --widget`；仅当文字直接绘制在视口或控件查不到时才用坐标裁剪，不把缩放后的截图坐标直接当桌面坐标。不要用 Python 侧 UMG 的 `get_cached_geometry` 取坐标：实测 PIE 正常绘制时也全为 0。
 
@@ -16,12 +16,12 @@
 
 UI 操作每一步都要"操作 → 等一帧 → 观察"，比脚本贵得多。按下面的顺序选：
 
-1. **能用脚本做的不走 UI**：查资产用 AssetRegistry、改蓝图用 WBP 编辑接口、启停 PIE 用 `lib/pie`。UI 操作只用于确认效果，或没有 API 的操作。
+1. **能用脚本做的不走 UI**：查资产用 AssetRegistry、改蓝图用 WBP 编辑接口、启停 PIE 用 `exec --action pie`。UI 操作只用于确认效果，或没有 API 的操作。
 2. **定位用 `find`，不用 `tree`**：`find` 只返回命中的几行；`tree` 用来第一次摸清陌生界面，并且要带根 Locator 和 `--depth`。整窗 `tree` 有数百行，上万 token。
 3. **操作和确认放在同一次调用**：给操作加 `--wait-until`，等期望的控件出现或消失，省掉单独的观察调用：
 
    ```bash
-   python scripts/ue_cli.py exec --lib ui click "text=Window" --wait-until "unreal.AgentSlateDriverFunctionLib.find_widgets('text=Enable Fullscreen','') != '[]'" --wait 5
+   python scripts/ue_cli.py exec --action ui click "text=Window" --wait-until "unreal.AgentSlateDriverFunctionLib.find_widgets('text=Enable Fullscreen','') != '[]'" --wait 5
    ```
 
    多个互不依赖结果的步骤（如点击、截图、关闭）可以写在同一条 shell 命令里顺序执行。
@@ -42,7 +42,7 @@ UI 操作每一步都要"操作 → 等一帧 → 观察"，比脚本贵得多�
 - **输入文字**：用 `--focus` 直接设焦点再输入，例如 `ui type WBP_Foo --focus="hint~=Search" --enter`。编辑器不在前台时先点击再输入可能拿不到焦点。带 `--focus` 的 `ui type` 原子替换（全选 → 输入 → 加 `--enter` 时提交 → 回读），实际值与请求值不符时命令失败；要往已有内容后追加用 `--append`。只在提交时同步业务值的输入框（数量框常见）必须加 `--enter`，否则框里显示新值、业务仍是旧值。提交后业务把值截到上下限时回读也会不符，`actual` 就是截断后的值，不是输入丢字。
 - **点击前校验**：`ui click` 默认断言光标下最上层控件是目标或其子节点，目标被抽屉/弹窗盖住、或目标是 HitTestInvisible 的文字（点击会穿透到下面的按钮）时直接失败，不会再"返回成功但点了别处"。确实需要穿透点击时加 `--no-check`；`--expect-hit=<Locator>` 换一个控件做同样的校验，用 `--at` 坐标点击时只有加它才会校验。目标被禁用时同样失败。
 - **滚动回读**：`ui scroll` 返回 `handled` / `moved`。`handled` 是整条事件路径有没有控件处理滚轮，不一定是滚动容器本身；`moved=false` 表示光标下内容没移动（已到边界、容器 `ConsumeMouseWheel=Never` 不响应滚轮，或被外围面板接管）。`handled=true` 且 `moved=false` 时，先读容器的 `consume_mouse_wheel` 与 `get_scroll_offset()` 再下结论。queued 成功不代表滚动生效。容器不吃滚轮时改用 `ui drag` 拖动内容。
-- **长按与按住**：`ui click ... --hold=秒`、`ui key <键> --hold=秒` 是定时长按，命令在抬起后才返回。要按住到某个条件成立，用 `ui keydown` / `ui mousedown` 加 CLI 的 `--wait-until`，然后 `ui keyup` / `ui mouseup`。键盘有现成清单：`sequence --lib hold-until --param key=E --param "until=<条件表达式>"`。拖动用 `ui drag <起点> --to=x,y [--frames=20]`，或者 `mousedown` → `move` → `mouseup`。这些命令都排在同一条时间线上，前一步失败时后面的步骤自动取消。按住的键到 `--max-hold`（默认 30 秒）会自动抬起，sequence 中途失败也会自动释放；需要时手动 `ui release`。`mousedown` 和 `ui click` 一样校验落点是否被遮挡。
+- **长按与按住**：`ui click ... --hold=秒`、`ui key <键> --hold=秒` 是定时长按，命令在抬起后才返回。要按住到某个条件成立，用 `ui keydown` / `ui mousedown` 加 CLI 的 `--wait-until`，然后 `ui keyup` / `ui mouseup`。键盘有现成清单：`sequence --action hold-until --param key=E --param "until=<条件表达式>"`。拖动用 `ui drag <起点> --to=x,y [--frames=20]`，或者 `mousedown` → `move` → `mouseup`。这些命令都排在同一条时间线上，前一步失败时后面的步骤自动取消。按住的键到 `--max-hold`（默认 30 秒）会自动抬起，sequence 中途失败也会自动释放；需要时手动 `ui release`。`mousedown` 和 `ui click` 一样校验落点是否被遮挡。
 - **输入在下一帧执行**：本次输出里的焦点、状态都是输入执行前的；用 `--wait-until` 在同一次调用里确认，或在下一次调用里用 `ui find` / 截图确认。
 - **隐藏控件查询**：`ui find "name=<控件名>" --hidden` 查询已有隐藏/未排布节点，显示 `hidden_by` 父级隐藏原因、`!geometry` 无效坐标和 `!query-only` 标记；避免展开整棵树。所有隐藏查询结果的下标/坐标仅作诊断，点击或截图须重新查询可见目标。默认 find 仍只查可见非零尺寸节点，空结果不证明控件不存在；必要时再 `tree --hidden --full` 查层级或查蓝图静态结构。未创建或未由容器公开的节点无法保证查到。
 - **资产编辑器标签页在前台时**，关卡编辑器里的面板（内容浏览器、关卡视口、PIE 视口）不可见，控件树里也找不到。
@@ -92,15 +92,15 @@ python scripts/ue_cli.py screenshot --pie --instance=1 --name=feature-view --arc
 - 这不等于激活编辑器：视口首次捕获、系统光标锁定、设备轮询还有独立的前台条件；遇到这类限制仍需激活窗口。不绕过预处理器、弹窗遮挡或业务状态。
 - 游戏按钮常有业务门槛（要双击、只在特定状态响应等），点了没反应先读按钮绑定的代码，再怀疑输入。
 - 确认业务效果读日志：用 `log mark` 在操作前取基线，之后 `log read --since=<游标> --filter=<关键词>`；要边操作边确认用 `exec ... --log-file=<路径> --wait-log=<关键词>`。按键后找输入处理代码里的日志，判断输入有没有到业务层。路径通常为 `Saved/Logs/<项目名>.log`，参数及轮转处理见 [cli.md](cli.md#log本地日志观察)。
-- **确认 PIE 世界**：先 `exec --lib pie worlds`，枚举当前 PIE 上下文、PC 数量和 PC0 类名。`UnrealEditorSubsystem.get_game_world()` 默认取 PIE 实例 0，未必是要操作的客户端；返回 Login 世界不代表客户端 travel 失败。不要从 ObjectIterator 或列表第一项盲选，操作时按确认过的世界路径明确选择并在 travel 后重查；无 PC 也不单独证明世界过期。枚举不覆盖另起进程的客户端。
+- **确认 PIE 世界**：先 `exec --action pie worlds`，枚举当前 PIE 上下文、PC 数量和 PC0 类名。`UnrealEditorSubsystem.get_game_world()` 默认取 PIE 实例 0，未必是要操作的客户端；返回 Login 世界不代表客户端 travel 失败。不要从 ObjectIterator 或列表第一项盲选，操作时按确认过的世界路径明确选择并在 travel 后重查；无 PC 也不单独证明世界过期。枚举不覆盖另起进程的客户端。
 - **运行 TS/JS 的通道**：Python Remote Execution 只执行 Python，不自动提供运行时 TS 求值。先查当前运行环境公开接口；已启用 Inspector 时按 [editor_tools.md](editor_tools.md#运行时-js--ts-inspector-诊断) 发现目标、在现有上下文或真实调用帧只读取数并清理。控制台回显不证明业务执行，不反复猜命令、调用受保护委托或加载另一套模块；构建与重开 PIE 的项目流程查项目资料。
 - **启动/切图期间远控会超时**：PIE 启动、地图加载会阻塞游戏线程，`--wait-until` 的单次求值可能超过 `--timeout`（默认 30s）。等待轮询遇到这种 `Timeout` 会继续收那条还没回来的结果，不重新发送，也不当作条件失败；若整段等待最终超时，先探测现场再决定，不要重发启动动作。
 - 怎么登录、怎么进到目标界面属于项目知识，查项目文档或记忆，不在本 Skill 里。
 
 ## 常见场景
 
-- **看 WBP 静态布局**：`exec --lib open_asset <WBP路径>`，等 1~2 秒再 `screenshot`。设计器里脚本逻辑不运行，列表/数据为空。
-- **看运行时界面**：分开确认会话启动、目标页面出现、数据/模型等资源就绪。`pie status=running` 不证明客户端有 PC，控件出现也不证明模型加载完成。启动后用目标控件作为页面等待条件：`exec --lib pie start --wait-until "unreal.AgentSlateDriverFunctionLib.find_widgets('class=<HUD 根控件类>', '') != '[]'" --wait 120 --timeout 150`，资源就绪再查业务加载状态/日志；只有视觉证据时，在有界等待后复查截图。
+- **看 WBP 静态布局**：`exec --action open_asset <WBP路径>`，等 1~2 秒再 `screenshot`。设计器里脚本逻辑不运行，列表/数据为空。
+- **看运行时界面**：分开确认会话启动、目标页面出现、数据/模型等资源就绪。`pie status=running` 不证明客户端有 PC，控件出现也不证明模型加载完成。启动后用目标控件作为页面等待条件：`exec --action pie start --wait-until "unreal.AgentSlateDriverFunctionLib.find_widgets('class=<HUD 根控件类>', '') != '[]'" --wait 120 --timeout 150`，资源就绪再查业务加载状态/日志；只有视觉证据时，在有界等待后复查截图。
   - 初期黑屏、空模型先作为加载暂态待确认，不马上归因或委派代码排查。相邻蓝图报错不等于根因；加载稳定后仍异常再分析，等待超时要保留“未就绪/未验证”的结论。
   - HUD 根控件通常铺满整个 PIE 视口，看具体区域要按其中的子控件截。
   - 引擎直接画在视口上的文字（屏幕调试信息 `Preparing ...`、`NAVMESH NEEDS TO BE REBUILT`、stat 数值等）不是 Slate 控件，控件树里没有，只能截图读。

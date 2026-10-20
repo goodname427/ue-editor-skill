@@ -1,9 +1,9 @@
 """
 批量移动/改名资产与引用检查（rename_asset 自动修引用，引用方会被编辑器自动签出）。
 
-  exec --lib asset_move check <源> <目标> [<源> <目标> ...]          只读：源/目标的存在性与类名、源的被引用方，移动前先看
-  exec --lib asset_move move <源> <目标> [...] [--save-referencers]  批量移动；跳过缺失的源与已存在的目标
-  exec --lib asset_move redirectors <目录> [--recursive]            列出改名后旧路径残留的 ObjectRedirector
+  exec --action asset_move check <源> <目标> [<源> <目标> ...]          只读：源/目标的存在性与类名、源的被引用方，移动前先看
+  exec --action asset_move move <源> <目标> [...] [--save-referencers]  批量移动；跳过缺失的源与已存在的目标
+  exec --action asset_move redirectors <目录> [--recursive]            列出改名后旧路径残留的 ObjectRedirector
 
 - 改名/移动被其它资产引用时，编辑器会自动签出并改写引用方，过程可能卡 1~3 分钟：加 --timeout 300，返回 Timeout 也不要重发，
   用 exec "print(1)" 探测恢复后看 move 输出核对结果。

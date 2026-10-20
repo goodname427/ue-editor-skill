@@ -155,7 +155,7 @@ actor.set_editor_property('property_name', new_value)
 
 适用于已启用兼容 Chrome DevTools Protocol（CDP）的本地运行时。它是本地调试通道，不是 Python Remote Execution 的 JS 功能；无需为只读取数改业务 bundle。只操作当前用户授权的项目调试实例，不扫描其它机器或强抢已占用的调试连接。
 
-1. **确认目标**：先 `exec --lib pie worlds` 选客户端，再从目标 GameInstance 的已公开属性、项目配置或启动日志确认调试端口。查 `http://127.0.0.1:<端口>/json/list`，使用实际返回/实现提供的 WebSocket 地址；多 PIE 不假定端口相同，配置和启用条件属于项目 Reference。
+1. **确认目标**：先 `exec --action pie worlds` 选客户端，再从目标 GameInstance 的已公开属性、项目配置或启动日志确认调试端口。查 `http://127.0.0.1:<端口>/json/list`，使用实际返回/实现提供的 WebSocket 地址；多 PIE 不假定端口相同，配置和启用条件属于项目 Reference。
 2. **建立连接**：复用本地已有 WebSocket 工具/依赖。多行 Node 探针写本地 `.cjs` 文件，不堆 `node -e` 引号，也不交给只执行 Python 的 `exec --file`。CDP 请求用独立 id 对应响应，检查协议 error 与 `exceptionDetails`；连接成功不等于表达式成功。
 3. **先看已有上下文**：用 `Runtime.enable` / `Debugger.enable` 获得实际执行上下文与 `Debugger.scriptParsed` 的已加载脚本。全局求值指定已确认上下文；不存在的全局变量、空 `require.cache` 不证明业务模块未加载。不要为找对象 `require` 旧散装文件、重建模块或猜转译后的导入名，以免创建第二套实例。
 4. **必要时用真实调用帧**：全局读不到业务局部状态时，从已加载脚本确认当前 URL、源码与入口位置，用 `Debugger.setBreakpointByUrl` 设置本次断点（行列从 0 开始）。只有断点已解析到目标位置，才输出 ready 并让另一次 CLI/UI 操作触发入口；不要边启动探针边抢先点击。

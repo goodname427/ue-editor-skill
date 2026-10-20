@@ -6,10 +6,12 @@ UE Editor CLI - Agent 通过 shell 调用 UE 编辑器的命令行接口。
   python ue_cli.py discover                          发现本地 UE 编辑器实例
   python ue_cli.py exec "<code>" [脚本参数...]        在编辑器内执行内联代码
   python ue_cli.py exec --file <path> [脚本参数...]   在编辑器内执行本地 .py 文件
-  python ue_cli.py exec --lib <name> [脚本参数...]    在编辑器内执行 lib/<name>.py 常用脚本
+  python ue_cli.py exec --action <name> [脚本参数...] 在编辑器内执行 actions/<name>.py 入口脚本
   python ue_cli.py screenshot [--rect=x,y,w,h]       截取 UE 编辑器窗口（本地 Win32，不经过编辑器）
   python ue_cli.py log mark/read/wait --file <path>  本地日志基线、增量读取和等待
-  python ue_cli.py sequence --file <steps.json>     跨帧步骤清单；内置清单也可 --lib <name>
+  python ue_cli.py sequence --file <steps.json>     跨帧步骤清单；内置清单也可 --action <name>
+
+lib/ 是编辑器内可 import 的模块（ue_input / ue_wbp / ue_common），工程 .codebuddy/ue-editor/lib/ 同理；每次执行前自动加进 sys.path。
 
 exec 成功时直接输出脚本 print 的文本，失败时输出 JSON（含 error_type / message）并以退出码 1 结束；
 screenshot / discover / log 输出 JSON；log 失败时退出码为 1。
@@ -29,13 +31,44 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ue_bridge import UEBridge, DEFAULT_DISCOVER_TIMEOUT as DISCOVER_TIMEOUT
 import ue_log
 
-LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib')
-# 编辑器侧可 import 的模块（ue_common / ue_input / ue_wbp …）；每次执行前加进 sys.path 并丢掉这些模块的缓存，git pull 后无需重启编辑器
-EDITOR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'editor')
-EDITOR_MODULES = sorted(f[:-3] for f in os.listdir(EDITOR_DIR) if f.endswith('.py'))
-PRELUDE = ('import sys\n'
-           'if %r not in sys.path: sys.path.insert(0, %r)\n'
-           'for _m in %r: sys.modules.pop(_m, None)\n') % (EDITOR_DIR, EDITOR_DIR, EDITOR_MODULES)
+_SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+# actions：CLI 执行的入口（读 ARGS/OPTS、做事、打印）；lib：编辑器内可 import 的模块（只定义函数，导入无副作用）
+ACTIONS_DIR = os.path.join(_SCRIPTS, 'actions')
+LIB_DIR = os.path.join(_SCRIPTS, 'lib')
+# 每次执行前把 Skill lib 与工程 <工程>/.codebuddy/ue-editor/lib 加进 sys.path，并丢掉这两处模块的缓存，
+# 改完或 git pull 后无需重启编辑器。工程目录在编辑器里求，不用另传。
+# 两处 lib 的模块名同时绑成惰性引用：等待条件里可以直接写 ph_market.ready()，不依赖哪个入口先执行过
+PRELUDE = '''def _ue_prelude():
+    import importlib, os, sys, unreal
+    dirs = [%r, os.path.normpath(os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_dir()), '.codebuddy', 'ue-editor', 'lib'))]
+    for d in reversed(dirs):
+        if d not in sys.path:
+            sys.path.insert(0, d)
+    roots = [os.path.normcase(d) + os.sep for d in dirs]
+    for name, module in list(sys.modules.items()):
+        path = os.path.normcase(getattr(module, '__file__', None) or '')
+        if any(path.startswith(r) for r in roots):
+            sys.modules.pop(name, None)
+
+    class LazyModule:
+        def __init__(self, name):
+            self.__name = name
+
+        def __getattr__(self, attr):
+            return getattr(importlib.import_module(self.__name), attr)
+
+        def __repr__(self):
+            return '<lib %%s>' %% self.__name
+
+    scope = globals()
+    for d in dirs:
+        for f in (os.listdir(d) if os.path.isdir(d) else ()):
+            name = f[:-3]
+            if f.endswith('.py') and name.isidentifier() and (name not in scope or type(scope[name]).__name__ == 'LazyModule' or isinstance(scope[name], type(sys))):
+                scope[name] = LazyModule(name)
+_ue_prelude()
+del _ue_prelude
+''' % LIB_DIR
 
 # 控制台/管道统一按 UTF-8 输出，避免 gbk 下中文乱码或编码异常
 sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')
@@ -54,14 +87,14 @@ def _decode(raw):
 
 
 def _read_source(args, tokens):
-    """按 --lib / --file / --stdin / 内联代码取源码，返回 (源码, 名称)；失败时打印错误并返回 (None, None)。
+    """按 --action / --file / --stdin / 内联代码取源码，返回 (源码, 名称)；失败时打印错误并返回 (None, None)。
     内联代码取 tokens 中第一个非选项参数（会从 tokens 中移除），其余 tokens 都是脚本参数。"""
     path = name = None
-    if args.lib:
-        path, name = os.path.join(LIB_DIR, args.lib + '.py'), 'lib/' + args.lib + '.py'
+    if args.action:
+        path, name = os.path.join(ACTIONS_DIR, args.action + '.py'), 'actions/' + args.action + '.py'
         if not os.path.isfile(path):
-            names = sorted(f[:-3] for f in os.listdir(LIB_DIR) if f.endswith('.py'))
-            _print_json({'status': 'error', 'error_type': 'ScriptNotFound', 'message': f'lib 中没有脚本 {args.lib!r}。',
+            names = sorted(f[:-3] for f in os.listdir(ACTIONS_DIR) if f.endswith('.py'))
+            _print_json({'status': 'error', 'error_type': 'ScriptNotFound', 'message': f'actions 中没有脚本 {args.action!r}。',
                          'suggestion': '可用脚本: ' + ', '.join(names)})
             return None, None
     elif args.file:
@@ -88,7 +121,7 @@ def _read_source(args, tokens):
         if not token.startswith('--'):
             return tokens.pop(i), '<exec>'
     _print_json({'status': 'error', 'error_type': 'NoInput',
-                 'message': '未提供代码：用内联代码、--file、--lib 或 --stdin 之一传入'})
+                 'message': '未提供代码：用内联代码、--file、--action 或 --stdin 之一传入'})
     return None, None
 
 
@@ -254,11 +287,11 @@ def _split_script_args(tokens):
 
 
 def _sequence_steps(args):
-    name = getattr(args, 'lib', None)
+    name = getattr(args, 'action', None)
     if name is not None:
         if not name or os.path.basename(name) != name or name in ('.', '..'):
-            raise ValueError('--lib 只接受非空清单名称；路径请使用 --file。')
-        path = os.path.join(LIB_DIR, name + '.sequence.json')
+            raise ValueError('--action 只接受非空清单名称；路径请使用 --file。')
+        path = os.path.join(ACTIONS_DIR, name + '.sequence.json')
     else:
         path = os.path.abspath(args.file)
     with open(path, 'rb') as fp:
@@ -272,31 +305,44 @@ def _sequence_steps(args):
         if not sep or not key or key in params:
             raise ValueError('--param 必须为唯一的 name=value。')
         params[key] = value
+    used = set()
     steps = []
-    allowed = {'name', 'file', 'lib', 'code', 'args', 'options', 'wait_before', 'wait_until', 'state', 'wait'}
+    allowed = {'name', 'file', 'action', 'code', 'args', 'options', 'wait_before', 'wait_until', 'state', 'wait'}
     for index, step in enumerate(manifest['steps']):
         if not isinstance(step, dict) or set(step) - allowed:
             raise ValueError('步骤 %d 含未知字段或不是对象。' % (index + 1))
-        source = [key for key in ('file', 'lib', 'code') if key in step]
+        source = [key for key in ('file', 'action', 'code') if key in step]
         if len(source) != 1 or not isinstance(step[source[0]], str) or not step[source[0]]:
-            raise ValueError('步骤 %d 必须指定 file/lib/code 之一。' % (index + 1))
+            raise ValueError('步骤 %d 必须指定 file/action/code 之一。' % (index + 1))
         positional, options = step.get('args', []), step.get('options', {})
         seconds = step.get('wait', 60)
         if not isinstance(positional, list) or not isinstance(options, dict) or any(not isinstance(k, str) for k in options):
             raise ValueError('步骤 args 必须是列表，options 必须是字符串键对象。')
 
-        def fill(value, number=index + 1):
-            # 整个值写成 "{名字}" 时替换成 --param 的值；缺参数在启动前报错，不等跑到一半
-            match = re.fullmatch(r'\{(\w+)\}', value) if isinstance(value, str) else None
-            if not match:
-                return value
-            if match.group(1) not in params:
-                raise ValueError('步骤 %d 需要 --param %s=<值>。' % (number, match.group(1)))
-            return params[match.group(1)]
+        placeholder = r'\{(\w+)(?:=([^{}]*))?\}'
+
+        def value_of(match, number=index + 1):
+            key, default = match.group(1), match.group(2)
+            used.add(key)
+            if key in params:
+                return params[key]
+            if default is None:
+                raise ValueError('步骤 %d 需要 --param %s=<值>。' % (number, key))
+            return default
+
+        def fill(value):
+            # 整个值写成 "{名字}" 或 "{名字=默认}" 时替换成 --param 的值；没默认值又没传时在启动前报错，不等跑到一半
+            match = re.fullmatch(placeholder, value) if isinstance(value, str) else None
+            return value_of(match) if match else value
+
+        def fill_expr(expr):
+            # 条件表达式：整值是占位符时原样替换（如 hold-until 的 "{until}"），表达式中间的占位符替换成字符串字面量
+            match = re.fullmatch(placeholder, expr)
+            return value_of(match) if match else re.sub(placeholder, lambda m: repr(value_of(m)), expr)
 
         positional = [fill(v) for v in positional]
         options = {k: fill(v) for k, v in options.items()}
-        step = dict(step, **{key: fill(step[key]) for key in ('wait_before', 'wait_until', 'state') if key in step})
+        step = dict(step, **{key: fill_expr(step[key]) for key in ('wait_before', 'wait_until', 'state') if isinstance(step.get(key), str)})
         if isinstance(seconds, bool) or not isinstance(seconds, int) or not 0 <= seconds <= 3600:
             raise ValueError('步骤 wait 必须是 0~3600 的整数秒。')
         for key in ('name', 'wait_before', 'wait_until', 'state'):
@@ -307,10 +353,10 @@ def _sequence_steps(args):
         if kind == 'code':
             text = step[kind]
         else:
-            if kind == 'lib':
+            if kind == 'action':
                 if os.path.basename(step[kind]) != step[kind]:
-                    raise ValueError('lib 只接受 Skill 脚本名；项目脚本使用 file。')
-                filename = os.path.join(LIB_DIR, step[kind] + '.py')
+                    raise ValueError('action 只接受 Skill 入口名；项目脚本使用 file。')
+                filename = os.path.join(ACTIONS_DIR, step[kind] + '.py')
             else:
                 filename = os.path.abspath(os.path.join(os.path.dirname(path), step[kind]))
             with open(filename, 'rb') as fp:
@@ -319,9 +365,12 @@ def _sequence_steps(args):
         for key in ('wait_before', 'wait_until', 'state'):
             if key in step:
                 compile(step[key], '<sequence:%s>' % key, 'eval')
-        code = PRELUDE + 'ARGS, OPTS, SEQUENCE_PARAMS = %r, %r, %r\nexec(compile(%r, %r, "exec"))\n' % (positional, options, params, text, filename)
+        code = PRELUDE + 'ARGS, OPTS = %r, %r\nexec(compile(%r, %r, "exec"))\n' % (positional, options, text, filename)
         steps.append(dict(step, name=step.get('name', 'step-%d' % (index + 1)), code=code, wait=seconds,
-                          parameters=PRELUDE + 'ARGS, OPTS, SEQUENCE_PARAMS = %r, %r, %r' % (positional, options, params)))
+                          parameters=PRELUDE + 'ARGS, OPTS = %r, %r' % (positional, options)))
+    unknown = sorted(set(params) - used)
+    if unknown:
+        raise ValueError('清单里没有步骤用到 --param %s（参数只通过 args/options 里的 "{名字}" 传给脚本）。' % ', '.join(unknown))
     return steps
 
 
@@ -369,9 +418,9 @@ def _run_sequence(bridge, steps):
                         result['last_state'] = str(state.get('result', ''))[:4000]
                     else:
                         result['state_error'] = state
-                if phase == 'wait_before' and 'NameError' in str(result.get('message', '')):
-                    result['hint'] = ('wait_before 在动作脚本执行前求值，看不到本步脚本里定义的函数；'
-                                      '条件要么改成直接查询表达式，要么放到上一步的 wait_until')
+                if 'NameError' in str(result.get('message', '')) and phase != 'execute':
+                    result['hint'] = ('条件里用到的函数没有定义。条件只调 lib 模块里的函数（如 ph_market.ready()，'
+                                      '模块名会预先绑好不用 import），不要依赖入口脚本里定义的函数')
                 # 前面的步骤可能按住了键/鼠标（如 hold-until），中途失败时放开，不让它一直按着
                 if any('[input-request]' in c['output'] for c in completed) or '[input-request]' in output:
                     released = bridge.evaluate('unreal.AgentSlateDriverFunctionLib.release_all_input() '
@@ -585,20 +634,20 @@ def main():
     # 清单来源
     sequence_source = p_sequence.add_mutually_exclusive_group(required=True)
     sequence_source.add_argument('--file', default=None, help='JSON 步骤清单路径，脚本相对路径以此文件为基准')
-    sequence_source.add_argument('--lib', default=None, help='读取 scripts/lib/<名称>.sequence.json 内置步骤清单')
+    sequence_source.add_argument('--action', default=None, help='读取 scripts/actions/<名称>.sequence.json 内置步骤清单')
 
     # 流程参数
-    p_sequence.add_argument('--param', action='append', default=[], help='可重复的 name=value，注入 SEQUENCE_PARAMS')
+    p_sequence.add_argument('--param', action='append', default=[], help='可重复的 name=value，替换步骤 args/options 里的 "{name}"')
 
     # exec：代码来源四选一；CLI 不认识的参数都传给脚本（--k=v / --k 进 OPTS，其余进 ARGS）
     # 关闭前缀匹配，避免脚本参数（如 --fi）被误认成 CLI 参数
     p_exec = sub.add_parser('exec', parents=[parent_parser], allow_abbrev=False,
-                            help='在编辑器内执行 Python：内联代码 / --file / --lib / --stdin')
+                            help='在编辑器内执行 Python：内联代码 / --file / --action / --stdin')
 
     # 代码来源
     source = p_exec.add_mutually_exclusive_group()
     source.add_argument('--file', default=None, help='执行本地 .py 文件（UTF-8，可含中文）')
-    source.add_argument('--lib', default=None, help='执行 scripts/lib/<name>.py 常用脚本，用法见脚本 docstring')
+    source.add_argument('--action', default=None, help='执行 scripts/actions/<name>.py 入口脚本，用法见脚本 docstring')
     source.add_argument('--stdin', action='store_true', help='从 stdin 管道读取代码')
 
     # 执行后等待

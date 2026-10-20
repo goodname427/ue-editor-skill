@@ -1,5 +1,5 @@
 """
-编辑器侧模块共用的小工具：取 AgentTools 的 C++ 库、解析它返回的 JSON。ue_input / ue_wbp 都从这里取，不各写一份。
+Skill lib 共用的小工具：取 AgentTools 的 C++ 库、解析它返回的 JSON。ue_input / ue_wbp 都从这里取，不各写一份。
 """
 import json
 import unreal

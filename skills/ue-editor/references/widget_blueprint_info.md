@@ -1,13 +1,13 @@
 # Widget 蓝图读写参考
 
-> 读取和改 Widget 蓝图（WBP）的结构、属性、函数。脚本里一律 `import ue_wbp`（`scripts/editor/ue_wbp.py`），常用写操作直接用 `exec --lib wbp_edit ...`（见 [widget_blueprint_edit.md](widget_blueprint_edit.md)）。
+> 读取和改 Widget 蓝图（WBP）的结构、属性、函数。脚本里一律 `import ue_wbp`（`scripts/lib/ue_wbp.py`），常用写操作直接用 `exec --action wbp_edit ...`（见 [widget_blueprint_edit.md](widget_blueprint_edit.md)）。
 > `ue_wbp` 的数据来自 AgentTools 插件 `AgentWidgetBlueprintInfoLib` 模块（仅编辑器）的 C++ 原子接口，再加上引擎自带的 `BlueprintEditorLibrary` / AssetRegistry。找不到 `unreal.AgentWidgetBlueprintInfoFunctionLib` 时，说明插件没编译或没启用。
 
 ## 分工
 
 - **C++ 只提供 Python 访问不到的原子能力**：控件树（含 `bIsVariable`）、属性的 UE 文本导出与导入、成员变量、动画绑定、属性绑定、NamedSlot 绑定、图表节点、函数签名、改控件名、加函数参数、函数描述。
-- **其余都在 `ue_wbp` 里拼**：树形结构、变量控件、概览、事件列表、函数搜索、单个节点详情、批量设属性、按目录列 WBP、继承链；加函数、删函数、改函数名用 `BlueprintEditorLibrary`。不要在项目脚本里另写一份。
-- 写操作只改内存。编译保存用 `wbp_edit save <路径>`，或 `BlueprintEditorLibrary.compile_blueprint` + `EditorAssetLibrary.save_asset`。改之前先签出资产。
+- **其余都在 `ue_wbp` 里拼**：树形结构、变量控件、概览、事件列表、函数搜索、单个节点详情、批量设属性、增删换控件、按目录列 WBP、继承链；加函数、删函数、改函数名用 `BlueprintEditorLibrary`。不要在项目脚本里另写一份。
+- 写操作只改内存。编译保存用 `ue_wbp.save(path)`（或 `wbp_edit save <路径>`）。改之前先签出资产。
 - C++ 失败时统一返回 `{"success": false, "message": ...}`，`ue_wbp` 会把它转成 `RuntimeError` 抛出。直接调 C++ 时用 `ue_common.parse` 解析。
 
 ## ue_wbp 函数
@@ -29,6 +29,20 @@
 | `rename_widget(path, old, new)` | 改名，并同步变量引用、属性绑定、动画绑定、导航绑定。不需要打开设计器，处理方式与设计器里改名一致 |
 
 `rename_widget` 改名前会检查：新名字不能和控件树里任何控件同名（包括没勾"是变量"的），只能用字母、数字和 `_`，不能以数字开头，也不能和成员变量、函数重名。引擎的名字校验器不检查非变量控件，所以撞上同名对象会直接 fatal，这道检查是专门为此加的。
+
+### 增删换控件
+
+| 函数 | 说明 |
+|---|---|
+| `add_widget(path, parent, name, cls, slot=None, var=True, text=None, text_name=None, text_font_from=None, copy_from=None)` | 在面板 `parent`（`'root'` 为根控件）末尾新增控件。返回 `{name, type, parent, kind, is_variable[, text][, copied]}` |
+| `replace_widget(path, old, cls, new_name=None, slot=None, var=None, ...)` | 同父面板换控件：旧实例移到 Transient，新控件沿用旧插槽（`slot` 里给的项覆盖），`var=None` 时沿用旧控件的"是变量" |
+| `remove_widget(path, name)` | 从父面板移除并移到 Transient |
+| `check_slot(slot)` | 校验插槽参数：`anchor` / `offset` / `align`（CanvasPanel）、`padding` / `size=(值, 'fill'\|'auto')` / `halign` / `valign`（横向/纵向/Overlay） |
+| `widget(path, name)` / `widget_tree(path)` | 控件对象 / WidgetTree 对象，调引擎 API 时用 |
+| `widget_class(text)`、`panel_kind(obj)`、`copy_props(target, source, names)`、`capture_slot` / `restore_slot` / `apply_slot` | 上面三个函数用到的零件，手写特殊流程时复用 |
+| `save(path)` | 编译并保存，返回是否成功 |
+
+用法与注意事项见 [widget_blueprint_edit.md](widget_blueprint_edit.md#脚本里改控件)。
 
 ### 蓝图数据
 

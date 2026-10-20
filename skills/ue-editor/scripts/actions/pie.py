@@ -1,10 +1,10 @@
 """
 PIE 启停与状态。启停请求在下一帧才生效，脚本内无法等待，需由 CLI 的 --wait-until 跨帧轮询：
 
-  exec --lib pie start --wait-until "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).is_in_play_in_editor()" --wait 90
-  exec --lib pie stop --wait-until "not unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).is_in_play_in_editor()"
-  exec --lib pie status
-  exec --lib pie worlds      枚举本编辑器进程当前 PIE 世界上下文，不自动选择世界
+  exec --action pie start --wait-until "unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).is_in_play_in_editor()" --wait 90
+  exec --action pie stop --wait-until "not unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).is_in_play_in_editor()"
+  exec --action pie status
+  exec --action pie worlds      枚举本编辑器进程当前 PIE 世界上下文，不自动选择世界
 
 is_in_play_in_editor() 为真只说明 PIE 会话已开始，地图、着色器、界面可能仍在加载（画面右下角 Preparing Shaders 等）。
 要看运行时界面，直接把目标控件出现作为等待条件（需 AgentTools）：

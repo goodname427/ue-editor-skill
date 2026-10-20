@@ -41,6 +41,45 @@ def find(locator, window=''):
     return parse(LIB.find_widgets(locator, window))
 
 
+def find_one(locator, window=''):
+    """第一个命中的控件，没有时返回 None。"""
+    matches = find(locator, window)
+    return matches[0] if matches else None
+
+
+_MARKS = (('interactable', '@click'), ('focus', '*focus'), ('hover', '^hover'))
+
+
+def describe(n, prefix=''):
+    """控件节点的一行文字：名称<类型:UMG类> [x,y,w,h] #tag "文本" hint=.. label=.. vis=.. owner=.. @click *focus ^hover !disabled。"""
+    if not n:
+        return '(none)'
+    kind = n['type'] + (':' + n['class'] if n.get('class') else '')
+    parts = [prefix + n.get('name', '') + '<' + kind + '>', '[%d,%d,%d,%d]' % tuple(n['rect'])]
+    if n.get('tag'):
+        parts.append('#' + n['tag'])
+    if n.get('text'):
+        parts.append('"' + n['text'].replace('\n', '\\n') + '"')
+    if n.get('hint'):
+        parts.append('hint="%s"' % n['hint'])
+    if n.get('label'):
+        parts.append('label="%s"' % n['label'])
+    if n.get('vis'):
+        parts.append('vis=' + n['vis'])
+    if n.get('owner') and n.get('owner') != n.get('name'):
+        parts.append('owner=' + n['owner'])
+    parts.extend(mark for key, mark in _MARKS if n.get(key))
+    if n.get('enabled') is False:
+        parts.append('!disabled')
+    if n.get('hidden_by'):
+        parts.append('hidden_by=' + n['hidden_by'])
+    if n.get('geometry_valid') is False:
+        parts.append('!geometry')
+    if n.get('query_only'):
+        parts.append('!query-only')
+    return ' '.join(parts)
+
+
 def match(locator, window='', index=0):
     matches = find(locator, window)
     if not 0 <= index < len(matches):

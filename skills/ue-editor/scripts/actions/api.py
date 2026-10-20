@@ -1,9 +1,9 @@
 """
 UE Python API 内省。
 
-  exec --lib api search <关键词>          按名称搜索类与方法（不区分大小写，最多 200 条；方法只列在定义它的类上）
-  exec --lib api methods <类名>           列出类的公开方法
-  exec --lib api help <类名> [方法名]      打印签名与 docstring
+  exec --action api search <关键词>          按名称搜索类与方法（不区分大小写，最多 200 条；方法只列在定义它的类上）
+  exec --action api methods <类名>           列出类的公开方法
+  exec --action api help <类名> [方法名]      打印签名与 docstring
 """
 import unreal
 

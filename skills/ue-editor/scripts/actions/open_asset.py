@@ -1,7 +1,7 @@
 """
 打开资产编辑器（WBP 设计器、蓝图、材质等）。打开后渲染需要 1~2 秒，截图前先等待。
 
-  exec --lib open_asset <资产路径>...      如 /Game/UI/XXX/WBP_Foo
+  exec --action open_asset <资产路径>...      如 /Game/UI/XXX/WBP_Foo
 """
 import unreal
 

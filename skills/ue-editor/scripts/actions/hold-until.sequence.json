@@ -2,7 +2,7 @@
   "steps": [
     {
       "name": "press and hold until condition",
-      "lib": "ui",
+      "action": "ui",
       "args": ["keydown", "{key}"],
       "options": {"max_hold": "70"},
       "wait_until": "{until}",
@@ -10,7 +10,7 @@
     },
     {
       "name": "release",
-      "lib": "ui",
+      "action": "ui",
       "args": ["keyup", "{key}"]
     }
   ]
