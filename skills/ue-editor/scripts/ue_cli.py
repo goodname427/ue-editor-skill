@@ -153,7 +153,7 @@ def _run(args, action):
             print('[warning] 未发现编辑器，额外发现一次（至多 %ss）。' % discover_timeout, file=sys.stderr)
             conn = bridge.connect(remote_node_id=args.node, timeout=discover_timeout)
         if conn['status'] != 'ok':
-            return conn
+            return dict(conn, command_sent=False)
         return action(bridge)
     finally:
         bridge.disconnect()
@@ -263,14 +263,14 @@ def _wait_until(bridge, result, args):
     """命令成功后跨帧轮询 --wait-until 表达式，直到为真或超过 --wait 秒（编辑器内的脚本无法跨帧等待）。"""
     if result['status'] != 'ok' or not args.wait_until:
         return result
-    begin = time.time()
+    begin = time.monotonic()
     r = _poll(bridge, args.wait_until, begin + args.wait)
     if r['status'] == 'ok':
-        result['waited'] = round(time.time() - begin, 1)
+        result['waited'] = round(time.monotonic() - begin, 1)
         return result
     if r['status'] == 'timeout':
         return {'status': 'error', 'error_type': 'WaitTimeout', 'output': result.get('output', ''),
-                'message': f'{args.wait}s 内 --wait-until 条件仍不成立。'}
+                'message': f'{args.wait}s 内 --wait-until 条件仍不成立。', 'command_sent': True}
     return r
 
 
@@ -538,6 +538,10 @@ def _screenshot_out(args):
 def cmd_screenshot(args):
     try:
         out = _screenshot_out(args)
+        if args.margin < 0 or (args.margin and not (args.rect or args.widget)):
+            raise ValueError('--margin 必须非负，且仅与 --rect / --widget 使用。')
+        if args.crop and (args.pie or args.rect or args.widget):
+            raise ValueError('--crop 是窗口内原始坐标，仅用于窗口截图；局部 PIE 用 --widget / --rect。')
     except ValueError as e:
         _print_json({'status': 'error', 'error_type': 'ScreenshotArguments', 'message': str(e)})
         sys.exit(1)
@@ -596,8 +600,9 @@ def cmd_screenshot(args):
     crop = [int(v) for v in args.crop.split(',')] if args.crop else None
     if rect:
         wl, wt, ww, wh = win['rect']
-        left, top = max(rect[0] - wl, 0), max(rect[1] - wt, 0)
-        crop = [left, top, min(rect[0] + rect[2] - wl, ww) - left, min(rect[1] + rect[3] - wt, wh) - top]
+        left, top = max(rect[0] - args.margin - wl, 0), max(rect[1] - args.margin - wt, 0)
+        crop = [left, top, min(rect[0] + rect[2] + args.margin - wl, ww) - left,
+                min(rect[1] + rect[3] + args.margin - wt, wh) - top]
 
     if crop and (crop[2] <= 0 or crop[3] <= 0):
         _print_json({'status': 'error', 'error_type': 'CaptureFailed', 'message': '截图区域不在目标窗口内。'})
@@ -609,8 +614,10 @@ def cmd_screenshot(args):
         _print_json({'status': 'error', 'error_type': 'CaptureFailed', 'message': str(e)})
         return
     res['window'] = win['title']
+    if rect:
+        res.update(rect=[win['rect'][0] + crop[0], win['rect'][1] + crop[1], crop[2], crop[3]], margin=args.margin)
     if pie:
-        res.update(world=pie['world'], instance=pie['instance'], rect=pie['rect'])
+        res.update(world=pie['world'], instance=pie['instance'])
     _print_json(dict(status='ok', **res))
 
 
@@ -665,7 +672,7 @@ def main():
     p_mark = log_sub.add_parser('mark', allow_abbrev=False, help='记录当前日志末尾基线')
     p_mark.add_argument('--file', required=True, help='本地 UTF-8 日志路径')
 
-    p_read = log_sub.add_parser('read', allow_abbrev=False, help='增量读取；不带基线时读取近期日志')
+    p_read = log_sub.add_parser('read', allow_abbrev=False, help='增量读取；无基线时带过滤搜全历史，否则读近期日志')
     p_read.add_argument('--file', required=True, help='本地 UTF-8 日志路径')
     p_read.add_argument('--since', default=None, help='mark/read 返回的 cursor')
     p_read.add_argument('--filter', default='', help='区分大小写的字面关键词，不使用正则')
@@ -700,7 +707,8 @@ def main():
     screenshot_output.add_argument('--out', default=None, help='精确输出 PNG 路径')
     screenshot_output.add_argument('--name', default=None, help='语义文件名，自动追加时间戳和 .png')
     p_ss.add_argument('--archive', default=None, help='直接输出到该证据目录，不再复制归档')
-    p_ss.add_argument('--crop', default=None, help='裁剪区域 x,y,w,h（相对窗口的原始像素）')
+    p_ss.add_argument('--crop', default=None, help='裁剪区域 x,y,w,h（相对窗口的原始像素，不与 --pie / --rect / --widget 使用）')
+    p_ss.add_argument('--margin', type=int, default=0, help='--rect / --widget 四边留白的桌面像素，超出窗口自动裁回 (默认 0)')
     p_ss.add_argument('--max-width', type=int, default=1600, help='保存前缩放到的最大宽度，0 为不缩放 (默认 1600)')
 
     # 参数解析与命令分派

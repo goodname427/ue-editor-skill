@@ -94,8 +94,10 @@ def read(path, since=None, filter_text='', max_lines=80, match_text=None):
         path = os.path.abspath(path)
         with open(path, 'rb', buffering=0) as fp:
             end = os.fstat(fp.fileno()).st_size
+            end_state = _parse_cursor(_cursor(fp, end, 0))
+            full_history = since is None and bool(filter_text)
             if since is None:
-                offset = max(0, end - MAX_SCAN_BYTES)
+                offset = 0 if full_history else max(0, end - MAX_SCAN_BYTES)
                 fp.seek(max(0, offset - 1))
                 skip = int(offset > 0 and fp.read(1) != b'\n')
                 since = _cursor(fp, offset, skip)
@@ -105,32 +107,61 @@ def read(path, since=None, filter_text='', max_lines=80, match_text=None):
             state = _parse_cursor(since)
             _verify(fp, path, state)
             offset, skip = state[2:4]
-            fp.seek(offset)
-            data = fp.read(min(MAX_SCAN_BYTES, end - offset))
-            complete = data.rfind(b'\n') + 1
-            if not complete and len(data) == MAX_SCAN_BYTES:
-                return _error('LogLineTooLong', '单行超过 1 MiB，无法安全推进完整行游标。')
-            raw_lines = data[:complete].split(b'\n')[:-1]
-            if skip and complete:
-                raw_lines = raw_lines[1:]
             rows, matches = collections.deque(maxlen=max_lines), collections.deque(maxlen=max_lines)
-            count, match_count = 0, 0
-            for raw in raw_lines:
-                line = raw.decode('utf-8-sig', errors='replace').rstrip('\r')
-                if not filter_text or filter_text in line:
-                    rows.append(line)
-                    count += 1
-                if match_text is not None and match_text in line:
-                    matches.append(line)
-                    match_count += 1
+            count, match_count, scanned_lines, consumed, pending_bytes, scanned_bytes = 0, 0, 0, 0, 0, 0
+            filter_bytes = filter_text.encode('utf-8')
+            match_bytes = match_text.encode('utf-8') if match_text is not None else None
+            tail_size = max(len(filter_bytes), len(match_bytes or b''), 1) - 1
+            tail, preview = b'', b''
+            line_matches, wait_matches = not filter_bytes, False
+            fp.seek(offset)
+            while True:
+                data = fp.read(min(MAX_SCAN_BYTES, end - offset - scanned_bytes))
+                if not data and scanned_bytes < end - offset:
+                    raise RuntimeError('扫描期间日志已截断；请重新取基线。')
+                scanned_bytes += len(data)
+                parts = data.split(b'\n')
+                for index, raw in enumerate(parts):
+                    probe = tail + raw
+                    line_matches = line_matches or filter_bytes in probe
+                    wait_matches = wait_matches or (match_bytes is not None and match_bytes in probe)
+                    preview += raw[:max(0, MAX_LINE_CHARS * 4 - len(preview))]
+                    pending_bytes += len(raw)
+                    tail = probe[-tail_size:] if tail_size else b''
+                    if index == len(parts) - 1:
+                        break
+                    if not skip:
+                        scanned_lines += 1
+                        line = preview.decode('utf-8-sig', errors='replace').rstrip('\r')
+                        if pending_bytes > len(preview):
+                            line += ' ... [line truncated]'
+                        if line_matches:
+                            rows.append(line)
+                            count += 1
+                        if wait_matches:
+                            matches.append(line)
+                            match_count += 1
+                    skip = 0
+                    consumed += pending_bytes + 1
+                    pending_bytes = 0
+                    tail, preview = b'', b''
+                    line_matches, wait_matches = not filter_bytes, False
+                if not full_history or scanned_bytes >= end - offset:
+                    break
+            if pending_bytes >= MAX_SCAN_BYTES:
+                return _error('LogLineTooLong', '未换行的单行超过 1 MiB，无法安全推进完整行游标。')
             _verify(fp, path, state)
-            token = _cursor(fp, offset + complete, 0 if complete else skip)
+            _verify(fp, path, end_state)
+            token = _cursor(fp, offset + consumed, skip)
         lines, trimmed = _bounded(rows)
         result = {'status': 'ok', 'file': path, 'cursor': token, 'lines': lines,
                   'line_count': count, 'truncated': history_truncated or count > len(lines) or trimmed,
-                  'scan_truncated': end - offset > len(data), 'pending_bytes': len(data) - complete,
-                  'start_offset': offset, 'end_offset': offset + complete, 'file_size': end,
-                  'scanned_lines': len(raw_lines), 'history_truncated': history_truncated}
+                  'scan_truncated': end - offset > consumed + pending_bytes, 'pending_bytes': pending_bytes,
+                  'start_offset': offset, 'end_offset': offset + consumed, 'file_size': end,
+                  'scanned_lines': scanned_lines, 'scan_from_line': 1 if offset == 0 else None,
+                  'history_truncated': history_truncated}
+        if count == 0 and (history_truncated or result['scan_truncated'] or pending_bytes):
+            result['note'] = '仅搜索字节区间 [%d, %d) 的 %d 个完整行；零匹配不代表全日志没有。' % (offset, offset + consumed, scanned_lines)
         if match_text is not None:
             match_lines, match_trimmed = _bounded(matches)
             result.update(matched=match_count > 0, match_lines=match_lines,

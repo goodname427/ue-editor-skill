@@ -322,7 +322,9 @@ class UEBridge:
             except Exception as e:
                 logger.warning(f'连接尝试 {attempt+1}/{DEFAULT_MAX_RETRIES} 失败: {e}')
                 if attempt == DEFAULT_MAX_RETRIES - 1:
-                    return _error('ConnectionFailed', f'连接节点 {target_id} 失败（已重试 {DEFAULT_MAX_RETRIES} 次）: {e}')
+                    return dict(_error('ConnectionFailed', f'连接节点 {target_id} 失败（已重试 {DEFAULT_MAX_RETRIES} 次）: {e}',
+                                       '本次命令未发送；先确认编辑器是否繁忙、核对之前操作的界面/日志，再决定是否重试。'),
+                                command_sent=False)
                 time.sleep(1)
 
     def _open_command_connection(self, remote_node_id):

@@ -100,9 +100,9 @@ C++ 只提供下表这些原子步骤，**点击、长按、按键、拖动、�
 | `type_text(text)` | 向当前焦点逐字发送字符事件（可含中文）；只追加，不清空 | `focus` |
 | `key_down(key, ctrl, shift, alt, max_hold=30)` | 按下并保持；普通退格额外发字符码 8 | `handled` |
 | `key_up(key)` | 抬起 `key_down` 按住的键；没按住时失败 | — |
-| `mouse_down(x, y, button, double, check_locator, window, index, max_hold=30)` | 先把指针移到落点再按下；`double=True` 时发双击事件。`check_locator` 非空时，执行前校验落点最上层控件是该控件或其子节点、且控件可用，否则失败、不发按下 | `hit` |
+| `mouse_down(x, y, button, double, check_locator, window, index, max_hold=30)` | 先把指针移到落点再按下；`double=True` 时发双击事件。校验目标/子节点；透明目标也可命中实际祖先，但目标几何须包含落点、路径可见且可用。相邻/遮挡/禁用仍失败、不发按下 | `hit`, `hit_via`（仅祖先路由） |
 | `mouse_up(button)` | 在当前指针位置抬起 | `pos`, `hit` |
-| `mouse_move(x, y, frames=1)` | 分 `frames` 帧线性移过去；有键按住时就是拖动 | `pos`, `hit`, `dragging` |
+| `mouse_move(x, y, frames=1)` | 分 `frames` 帧线性移过去；有键按住时就是拖动。最后一步后保持悬停 10 秒，后续 move 续期；不会移动系统光标 | `pos`, `hit`, `dragging`, `hover_seconds` |
 | `mouse_wheel(x, y, delta)` | 滚一次滚轮（正数向上） | `handled` |
 | `wait_input(seconds, frames)` | 时间线上等待，秒数和帧数都满足才算完成 | — |
 | `release_all_input()` | **不排队**，下一帧就取消所有未完成的步骤，并抬起本库按住的全部键 | `released` |
@@ -110,7 +110,7 @@ C++ 只提供下表这些原子步骤，**点击、长按、按键、拖动、�
 - **一条时间线**：除 `release_all_input` 外，每个调用排一步：前一步完成才执行下一步，相邻两步至少隔一帧，某步失败时其后所有步骤取消，结果消息为 `Cancelled because an earlier queued input failed`。所以同一个脚本里连着调用就行，不需要等。
 - **排队返回**：`success` 只表示已经排进队列，另含 `request_id`。`mouse_down` 排队时还会返回 `pos`、`hit`（排队那一刻的快照）；带校验时另含 `match_count`、`target`。
 - **防止一直按着**：按住的键记在本库内，到 `max_hold` 秒自动抬起（0 为不限，不建议）。
-- **按住鼠标期间关闭合成光标移动**：Slate 在 UI 变化时，会按真实光标位置补发一次鼠标移动（`Slate.EnableSyntheticCursorMoves`）。真实光标不在落点上，按钮就会判定指针已离开并取消按下，抬起时不算点击，表现为连点只有一部分生效。所以本库按住鼠标键期间把这个 CVar 置 0，全部抬起后恢复原值。
+- **按住与悬停共用抑制状态**：Slate 会按真实光标位置自动补发移动（`Slate.EnableSyntheticCursorMoves`），取消注入的按下/悬停。本库按住鼠标或最后一次 move 后 10 秒内暂时置 0，续期看最新截止点；悬停到期但还有按键时不恢复，全部抬起、`release_all_input` 或排队输入失败会清除悬停保持。按键与悬停共用一次原值保存，最后一个所有者退出才恢复，原值为 0 也不强制改成 1；写入沿用当前 CVar 优先级，避免手动控制台设置后被拒绝。真实鼠标仍可改变命中，`hit.hover` 不证明业务浮窗显示，见 [ui_verify.md](ui_verify.md#要点)。
 - **合成事件只走 Slate**：不移动系统光标。游戏侧 `PlayerController.is_input_key_down` / `get_input_key_time_down` 能读到按住状态（PIE 实测）。不会产生系统级按键重复，按住字母键不会在输入框里连续出字。修饰键只写入本次事件，不更新系统修饰键状态。事件回包仍可能请求捕获或锁定光标。
 
 ### ue_input 组合

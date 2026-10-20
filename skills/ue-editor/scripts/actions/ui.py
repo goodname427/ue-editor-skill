@@ -32,8 +32,10 @@
 - 带 --focus 的 type 是原子替换：全选旧内容 → 输入 → 加 --enter 时提交 → 回读，实际值不一致直接判失败；
   数字/搜索框把新值追加到旧值后面（1→1100000）时不会再静默成功。只在提交时同步业务的框必须加 --enter；
   被业务上下限截断时 actual 是截断后的值。保留旧内容用 --append。
-- click 默认校验落点最上层控件是目标或其子节点、且目标可用：目标被抽屉/弹窗盖住、或文字是 HitTestInvisible 时会失败而不是点到别处；
-  --expect-hit 换一个控件做同样的校验（--at 坐标点击时只有它会校验）。确实要点击穿透时用 --no-check。
+- click 默认校验目标/子节点；透明目标可命中实际祖先，回包带 hit_via。相邻条目、遮挡或禁用仍失败。
+  列表/页签可直接按文字 Locator 点；坐标点击取条目容器中心并加 --expect-hit，内层文字 rect 不保证可点。
+- move 完成后保持悬停 10 秒，继续 move 续期；ui release、最后一个鼠标键抬起、排队输入失败或到期恢复原开关。
+  hover 只是 Slate IsHovered，不证明业务 Tips 出现；用 --wait-until 等已确认的浮窗，再查询/截图。原生 ToolTip 另有真实光标条件。
 - scroll 返回 handled / moved：handled 是事件路径上有没有控件处理滚轮，moved 才是内容是否移动；
   容器 ConsumeMouseWheel=Never 时 handled 可能为 true 而 moved=false。不能只看 queued。
 - 长按：click / key 加 --hold=秒（按住这么久再抬起，命令在抬起后才返回）。按住直到某个条件成立：

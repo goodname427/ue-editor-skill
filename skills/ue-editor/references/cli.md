@@ -31,7 +31,7 @@ python scripts/ue_cli.py exec --file do_rename.py --timeout 300             # �
 - **编码**：输入按 UTF-8 解码并忽略 BOM，输出统一 UTF-8；超过一行的代码写成 `.py` 用 `--file`，避开 Shell 转义。
 - **源码载荷**：`--file` 读取内容后按源码发送，Bridge 用 `ExecuteStatement` 包装多语句执行；可保留模块 docstring、`.py` 字符串和原始行号，不需要改成注释。旧版 Bridge 使用 `ExecuteFile` 会把源码中某些 `.py` 文本误当文件名。
 - **编辑器内路径**：`unreal.Paths.project_dir()` 可能是相对路径，需要磁盘绝对路径时用 `unreal.Paths.convert_relative_path_to_full(...)`；不要假定它与本地 CLI 工作目录相同。
-- **跨帧等待**：编辑器内的脚本会阻塞当前帧，无法等待"下一帧才生效"的结果。需要等待时加 `--wait-until "<表达式>" [--wait 秒数]`，CLI 在执行成功后每秒求值一次，直到为真；超时返回 `WaitTimeout`。执行前会先预检一次，条件已成立时输出 `[warning]`（等待不能证明操作生效，要换条件）。
+- **跨帧等待**：编辑器内的脚本会阻塞当前帧，无法等待"下一帧才生效"的结果。需要等待时加 `--wait-until "<表达式>" [--wait 秒数]`，CLI 成功执行后每 0.5 秒求值一次，按单调时钟计时，直到为真或到期返回 `WaitTimeout`（`command_sent=true`，不能据此重发）。执行前会先预检一次，条件已成立时输出 `[warning]`（等待不能证明操作生效，要换条件）。
 - **等待中远控超时**：PIE 启动、地图加载会阻塞游戏线程，单次求值可能超过 `--timeout`。此时 CLI 不重发命令，而是继续收那条尚未返回的结果直到 `--wait` 用完；仍不成立才报 `WaitTimeout` / `SequenceWaitTimeout`。`--timeout` 只管单次命令结果，不覆盖整段等待。
 - **连接恢复**：换地图等重操作可能让远控短暂不可发现。命令发送前遇到 `NoEditorFound` 时自动额外发现一次并输出告警，默认两次发现合计至多约 10 秒；显式 `discover` 不额外重试。`Timeout` / `InvalidResponse` 等命令发送后的错误不自动重发，以免重复执行改动。
 
@@ -131,10 +131,10 @@ python scripts/ue_cli.py log wait --file $log --since $base.cursor --text '[MyFe
 ```
 
 - `mark`：返回当前文件末尾 `cursor`，操作前取一次。不保存额外基线文件。
-- `read`：返回新增完整行、统计与新 `cursor`。不带 `--since` 时读近期日志；`--filter` 为区分大小写的字面包含匹配。续读使用返回的游标，不能跨文件。
-- **扫描范围**：`start_offset` / `end_offset` 是实际消费的字节区间，`file_size` 是读取时文件大小；`scanned_lines` 是过滤前行数，`line_count` 是匹配数。`history_truncated=true` 表示省略了更早历史，零匹配只能说明此次范围无匹配，不代表全日志没有；`scan_truncated=true` 时用返回游标续读。
+- `read`：返回完整行、统计与新 `cursor`。无 `--since` 且带非空 `--filter` 时分块搜索读取时的全历史，只保留最后 N 条匹配；无基线、无过滤仍只读最后 1 MiB。带基线时只读本游标后的一个扫描块，不自动变成全历史。`--filter` 为区分大小写的字面包含匹配。续读用返回的游标，不能跨文件。
+- **扫描范围**：`start_offset` / `end_offset` 是实际消费的字节区间，`file_size` 是读取时文件大小；`scanned_lines` 是过滤前完整行数，`line_count` 是匹配总数（可能大于输出行数）。从文件头开始时 `scan_from_line=1`，其它位置为 null，不为求绝对行号额外读前缀。`history_truncated=true` 表示略过更早历史；零匹配且范围未完整/有半行时，`note` 明确扫描区间和行数，不代表全日志没有。`scan_truncated=true` 时用返回游标续读。
 - `wait`：从明确基线等待新完整行包含 `--text`；旧日志不满足条件。成功输出匹配行，超时输出有限的新增近期上下文及新游标；不重发任何操作。
-- `--lines` 限 1~200，`read` 默认 80、`wait` 默认 40；单行最多 2000 字符，总正文最多 12000 字符。JSON 中 `truncated` 表示输出限量，`scan_truncated` 表示单次最多扫描 1 MiB 后还有未读数据，可用新游标继续读。等待会自动继续扫描。
+- `--lines` 限 1~200，`read` 默认 80、`wait` 默认 40；单行最多 2000 字符，总正文最多 12000 字符。`truncated` 表示输出/历史限量；增量读取 `scan_truncated` 表示一个 1 MiB 块后还有未读数据，等待会自动续扫。无基线带过滤时逐块扫到读取快照末尾，长完整行也跨块匹配，正文仍限量；超过 1 MiB 的未完成行无法安全推进游标，明确报错，不静默丢行。
 - 输出 JSON，成功退出码 0，失败退出码 1。半行尚未换行则不消费（`pending_bytes`）；基线落在旧半行时，其后补完的那一行不作新增证据。
 - 文件轮转、变小或基线附近改写时报 `LogChanged`，不静默从头重读。校验使用文件身份和基线头尾各最多 64 字节；同文件截断后若恰好恢复这些校验字节且已增长过游标，不能识别，已知重启/重写后应重新取基线。
 
@@ -159,7 +159,7 @@ CLI 在命令执行前取基线，执行成功后在本地等待新增日志；`
 | error_type | 原因 | 建议 |
 |------------|------|------|
 | `NoEditorFound` | 未发现 UE 编辑器 | 确认编辑器运行且 bRemoteExecution=True |
-| `ConnectionFailed` | TCP 连接失败 | 检查端口 6776 是否被占用 |
+| `ConnectionFailed` | TCP 连接失败，本次命令未发送（`command_sent=false`） | 编辑器可能仍在处理之前的输入；先探测响应、核对界面/日志，再决定是否重试。检查命令端口是否被占用，不把之前的界面变化归给本次失败命令 |
 | `Timeout` | 等待结果超时 | 编辑器可能仍在执行，**不要重发**；用 `exec "print(1)"` 探测恢复后核对结果，耗时操作加大 `--timeout` |
 | `WaitTimeout` | `--wait-until` 条件在 `--wait` 秒内未成立 | 命令本身已执行；确认条件表达式，或加大 `--wait` |
 | `SequenceFileError` | 清单来源、字段、文件或语法不可用 | 校验 `--action` 名称/`--file` 路径与所有步骤；尚未运行步骤 |
@@ -174,7 +174,7 @@ CLI 在命令执行前取基线，执行成功后在本地等待新增日志；`
 | `WindowNotFound` / `CaptureFailed` | 截图找不到窗口或窗口最小化；`--popup` 时没有打开的弹出层 | `screenshot --list` 查看可用窗口，让用户还原窗口 |
 | `WidgetNotFound` | `screenshot --widget` 没有命中第 `--index` 个控件 | 先 `ui find` 确认 Locator |
 | `PIEViewportNotFound` / `PIEViewportAmbiguous` | PIE 视口未排布或目标不唯一 | `screenshot --pie --list` 后按实际实例选择 |
-| `ScreenshotArguments` | 截图命名、归档或实例参数不合法 | 检查 name/out/archive 及 --instance 的使用 |
+| `ScreenshotArguments` | 截图命名、归档、实例、边距或 crop 组合不合法 | 检查 name/out/archive；margin 非负且只配 rect/widget；crop 不配 pie/rect/widget |
 | `InputAssertionFailed` | 发送前命中路径不符合预期或目标失效 | 查 input.hit / clicks_sent，不重放部分双击 |
 | `InputWaitTimeout` | 断言点击结果仍在排队 | 保存 request_id，恢复后查询，不能重发 |
 | `DependencyMissing` | 截图缺少 pywin32/Pillow | `pip install pywin32 pillow` |

@@ -887,8 +887,14 @@ static bool SDIsPending(int32 RequestId)
 	return Result && Result->Contains(TEXT("\"pending\":true"));
 }
 
+static void SDClearHover();
+
 static void SDSetInputResult(int32 RequestId, bool bSuccess, const FString& Message, TArray<FString> Fields = TArray<FString>())
 {
+	if (!bSuccess)
+	{
+		SDClearHover();
+	}
 	if (RequestId != 0 && SDInputResults.Contains(RequestId))
 	{
 		Fields.Insert(AgentJson::PairBool(TEXT("pending"), false), 0);
@@ -906,6 +912,7 @@ static void SDCancelTimeline(const FString& Message)
 		}
 	}
 	SDTimeline.Empty();
+	SDClearHover();
 }
 
 static bool SDTickTimeline(float)
@@ -990,8 +997,11 @@ static void SDReleaseKey(const FKey& Key)
 	}
 }
 
-// 按住鼠标键期间关掉 Slate 的合成光标移动：它按真实光标位置补发移动，按钮会判定指针已离开并取消按下，抬起时不算点击
+// 按住或悬停保持期间关闭自动光标移动，避免真实光标的位置覆盖注入路径
 static TOptional<int32> SDSavedSyntheticMoves;
+static double SDHoverDeadline = 0.0;
+static bool bSDHoverTicking = false;
+static constexpr double SDHoverSeconds = 10.0;
 
 static void SDSuppressSyntheticMoves(bool bSuppress)
 {
@@ -1003,12 +1013,38 @@ static void SDSuppressSyntheticMoves(bool bSuppress)
 	if (bSuppress && !SDSavedSyntheticMoves.IsSet())
 	{
 		SDSavedSyntheticMoves = Var->GetInt();
-		Var->Set(0, ECVF_SetByCode);
+		Var->Set(0, static_cast<EConsoleVariableFlags>(Var->GetFlags() & ECVF_SetByMask));
 	}
 	else if (!bSuppress && SDSavedSyntheticMoves.IsSet())
 	{
-		Var->Set(SDSavedSyntheticMoves.GetValue(), ECVF_SetByCode);
+		Var->Set(SDSavedSyntheticMoves.GetValue(), static_cast<EConsoleVariableFlags>(Var->GetFlags() & ECVF_SetByMask));
 		SDSavedSyntheticMoves.Reset();
+	}
+}
+
+static void SDClearHover()
+{
+	SDHoverDeadline = 0.0;
+	SDSuppressSyntheticMoves(SDHeldButtons.Num() > 0);
+}
+
+static void SDKeepHover()
+{
+	SDHoverDeadline = FPlatformTime::Seconds() + SDHoverSeconds;
+	SDSuppressSyntheticMoves(true);
+	if (!bSDHoverTicking)
+	{
+		bSDHoverTicking = true;
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([](float)
+		{
+			if (FSlateApplication::IsInitialized() && FPlatformTime::Seconds() < SDHoverDeadline)
+			{
+				return true;
+			}
+			SDClearHover();
+			bSDHoverTicking = false;
+			return false;
+		}));
 	}
 }
 
@@ -1021,7 +1057,7 @@ static void SDReleaseButton(const FKey& Button)
 		FSlateApplication::Get().ProcessMouseButtonUpEvent(SDMakePointerEvent(Pos, Pos, SDHeldButtons, Button, 0.0f));
 		if (SDHeldButtons.Num() == 0)
 		{
-			SDSuppressSyntheticMoves(false);
+			SDClearHover();
 		}
 	}
 }
@@ -1072,15 +1108,43 @@ static FWidgetPath SDInputPathAt(const FVector2D& Pos)
 	return SlateApp.LocateWindowUnderMouse(Pos, SlateApp.GetInteractiveTopLevelWindows(), false, UserIndex);
 }
 
-// 最上层控件是目标本身或其子节点才算点中；被遮挡时最上层是别的控件
-static bool SDHitsTarget(const FWidgetPath& Path, const TSharedPtr<SWidget>& Target)
+// 透明文字允许命中自己的祖先，兄弟节点和遮挡控件仍拒绝
+static bool SDHitsTarget(const FWidgetPath& Path, const TSharedPtr<SWidget>& Target, const FVector2D& Pos, FString& HitVia)
 {
+	HitVia.Empty();
 	if (!Path.IsValid() || Path.Widgets.Num() == 0 || !Target.IsValid() || !Target->GetVisibility().IsVisible())
 	{
 		return false;
 	}
 	const TSharedPtr<SWidget> Top = Path.Widgets.Last().Widget;
-	return Top == Target || SDIsAncestorOf(Target, Top);
+	if (Top == Target || SDIsAncestorOf(Target, Top))
+	{
+		return true;
+	}
+	if (Target->GetVisibility().IsHitTestVisible() || !SDIsAncestorOf(Top, Target))
+	{
+		return false;
+	}
+	FWidgetPath TargetPath;
+	if (!FSlateApplication::Get().GeneratePathToWidgetUnchecked(Target.ToSharedRef(), TargetPath)
+		|| !TargetPath.IsValid() || !TargetPath.Widgets.Last().Geometry.IsUnderLocation(Pos))
+	{
+		return false;
+	}
+	for (int32 Index = 0; Index < TargetPath.Widgets.Num(); ++Index)
+	{
+		const TSharedRef<SWidget>& Widget = TargetPath.Widgets[Index].Widget;
+		if (!Widget->IsEnabled() || !Widget->GetVisibility().IsVisible())
+		{
+			return false;
+		}
+	}
+	HitVia = SDFindOwnerName(Top);
+	if (HitVia.IsEmpty())
+	{
+		HitVia = Top->GetTypeAsString();
+	}
+	return true;
 }
 
 static FString SDPathHitJson(const FWidgetPath& Path)
@@ -1352,6 +1416,7 @@ FString UAgentSlateDriverFunctionLib::MouseDown(float X, float Y, const FString&
 			SDSetInputResult(Id, false, TEXT("Mouse button is already held; release it first"));
 			return ESDStep::Failed;
 		}
+		FString HitVia;
 		auto CheckPath = [&](const FWidgetPath& Path)
 		{
 			if (!Path.IsValid())
@@ -1369,9 +1434,9 @@ FString UAgentSlateDriverFunctionLib::MouseDown(float X, float Y, const FString&
 				SDSetInputResult(Id, false, TEXT("Target is disabled; no mouse down was sent"), {AgentJson::PairRaw(TEXT("hit"), SDPathHitJson(Path))});
 				return false;
 			}
-			if (!SDHitsTarget(Path, Target))
+			if (!SDHitsTarget(Path, Target, Pos, HitVia))
 			{
-				SDSetInputResult(Id, false, TEXT("Target check failed: the topmost widget at the press point is neither the target nor its child; it is probably covered or hit-test invisible, so no mouse down was sent"),
+				SDSetInputResult(Id, false, TEXT("Target check failed: the press point is outside the target path or covered; no mouse down was sent"),
 					{AgentJson::PairRaw(TEXT("hit"), SDPathHitJson(Path))});
 				return false;
 			}
@@ -1404,7 +1469,12 @@ FString UAgentSlateDriverFunctionLib::MouseDown(float X, float Y, const FString&
 		const int32 Serial = ++SDNextHoldSerial;
 		SDHoldSerials.Add(ButtonKey, Serial);
 		SDArmWatchdog(ButtonKey, Serial, MaxHoldSeconds);
-		SDSetInputResult(Id, true, FString(), {AgentJson::PairRaw(TEXT("hit"), SDPathHitJson(Path))});
+		TArray<FString> Fields = {AgentJson::PairRaw(TEXT("hit"), SDPathHitJson(Path))};
+		if (!HitVia.IsEmpty())
+		{
+			Fields.Add(AgentJson::Pair(TEXT("hit_via"), HitVia));
+		}
+		SDSetInputResult(Id, true, FString(), Fields);
 		return ESDStep::Done;
 	});
 	return SDQueued(RequestId, ExtraFields);
@@ -1456,6 +1526,7 @@ FString UAgentSlateDriverFunctionLib::MouseMove(float X, float Y, int32 Frames)
 		++*Step;
 		const FVector2D Last = SDPointer();
 		const FVector2D Pos = FMath::Lerp(*From, To, static_cast<double>(*Step) / StepCount);
+		SDKeepHover();
 		FSlateApplication::Get().ProcessMouseMoveEvent(SDMakePointerEvent(Pos, Last, SDHeldButtons, EKeys::Invalid, 0.0f));
 		SDPointerPos = Pos;
 		if (*Step < StepCount)
@@ -1463,7 +1534,7 @@ FString UAgentSlateDriverFunctionLib::MouseMove(float X, float Y, int32 Frames)
 			return ESDStep::Running;
 		}
 		SDSetInputResult(Id, true, FString(), {AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)), AgentJson::PairRaw(TEXT("hit"), SDDescribeHit(Pos)),
-			AgentJson::PairBool(TEXT("dragging"), SDHeldButtons.Num() > 0)});
+			AgentJson::PairBool(TEXT("dragging"), SDHeldButtons.Num() > 0), AgentJson::PairInt(TEXT("hover_seconds"), static_cast<int32>(SDHoverSeconds))});
 		return ESDStep::Done;
 	});
 	return SDQueued(RequestId);
