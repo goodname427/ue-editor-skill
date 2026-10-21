@@ -1127,6 +1127,52 @@ FString UAgentSlateDriverFunctionLib::AnalogInput(const FString& KeyName, float 
 		AgentJson::PairInt(TEXT("slate_user"), SlateUser.GetValue())});
 }
 
+// ==================== 光标原子接口 ====================
+
+FString UAgentSlateDriverFunctionLib::UsePlatformCursorForCursorUser(bool bUsePlatformCursor)
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return SDResult(false, TEXT("Slate is not initialized"));
+	}
+	FSlateApplication& SlateApp = FSlateApplication::Get();
+	const FVector2D Position = SlateApp.GetCursorPos();
+	const TSharedPtr<ICursor> PlatformCursor = SlateApp.GetPlatformCursor();
+	if (!PlatformCursor.IsValid())
+	{
+		return SDResult(false, TEXT("Platform cursor is unavailable"));
+	}
+	const int32 CursorType = static_cast<int32>(PlatformCursor->GetType());
+	SlateApp.UsePlatformCursorForCursorUser(bUsePlatformCursor);
+	return SDResult(true, FString(), {AgentJson::PairRaw(TEXT("pos"), SDPointJson(Position)),
+		AgentJson::PairBool(TEXT("visible"), CursorType != static_cast<int32>(EMouseCursor::None))});
+}
+
+FString UAgentSlateDriverFunctionLib::SetCursorPosition(float X, float Y)
+{
+	if (!FSlateApplication::IsInitialized() || !FMath::IsFinite(X) || !FMath::IsFinite(Y))
+	{
+		return SDResult(false, TEXT("Slate is unavailable or cursor position is invalid"));
+	}
+	FSlateApplication::Get().SetCursorPos(FVector2D(X, Y));
+	return SDResult(true, FString());
+}
+
+FString UAgentSlateDriverFunctionLib::SetCursorVisibility(bool bVisible)
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return SDResult(false, TEXT("Slate is not initialized"));
+	}
+	const TSharedPtr<FSlateUser> User = FSlateApplication::Get().GetCursorUser();
+	if (!User.IsValid())
+	{
+		return SDResult(false, TEXT("Slate cursor user is unavailable"));
+	}
+	User->SetCursorVisibility(bVisible);
+	return SDResult(true, FString());
+}
+
 // 会接收鼠标按下的路径：有捕获时是捕获者路径，否则是光标下的命中路径
 static FWidgetPath SDInputPathAt(const FVector2D& Pos)
 {

@@ -39,6 +39,11 @@ class AnalogTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('input_under_test', path / 'ue_input.py')
         self.input = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.input)
+        self.preserve_cursor = self.input.preserve_cursor
+        self.input.preserve_cursor = mock.Mock(return_value={'pending': False, 'ok': True})
+        self.lib.use_platform_cursor_for_cursor_user.return_value = json.dumps({'success': True, 'pos': [100, 200], 'visible': True})
+        self.lib.set_cursor_position.return_value = json.dumps({'success': True})
+        self.lib.set_cursor_visibility.return_value = json.dumps({'success': True})
         self.clock = mock.patch.object(self.input.time, 'monotonic', return_value=0.0)
         self.now = self.clock.start()
         self.addCleanup(self.clock.stop)
@@ -57,6 +62,65 @@ class AnalogTests(unittest.TestCase):
         self.now.return_value = now
         for callback in list(self.callbacks.values()):
             callback(1 / 60)
+
+    def test_cursor_isolation_restores_after_two_post_ticks_without_warp(self):
+        finished = {'done': False}
+        guard = self.preserve_cursor(lambda: finished['done'])
+        self.lib.use_platform_cursor_for_cursor_user.assert_called_once_with(False)
+        self.lib.set_cursor_position.assert_called_once_with(100, 200)
+        self.tick(0.1)
+        self.assertTrue(guard['pending'])
+        finished['done'] = True
+        self.tick(0.2)
+        self.assertTrue(guard['pending'])
+        self.tick(0.3)
+        self.assertTrue(guard['ok'])
+        self.assertFalse(guard['pending'])
+        self.lib.set_cursor_visibility.assert_called_once_with(True)
+        self.assertEqual(self.lib.use_platform_cursor_for_cursor_user.call_args_list, [mock.call(False), mock.call(True)])
+        self.lib.set_cursor_position.assert_called_once_with(100, 200)
+        self.assertFalse(self.callbacks)
+
+    def test_cursor_timeout_restores_and_reports_failure(self):
+        guard = self.preserve_cursor(lambda: False, timeout=1)
+        self.tick(2)
+        self.assertFalse(guard['pending'])
+        self.assertFalse(guard['ok'])
+        self.lib.use_platform_cursor_for_cursor_user.assert_called_with(True)
+        self.assertFalse(self.callbacks)
+
+    def test_cursor_restores_platform_binding_even_if_visibility_fails(self):
+        guard = self.preserve_cursor(lambda: True)
+        self.lib.set_cursor_visibility.side_effect = RuntimeError('visibility failed')
+        self.tick(0.1)
+        self.tick(0.2)
+        self.assertFalse(guard['ok'])
+        self.assertIn('visibility failed', guard['message'])
+        self.lib.use_platform_cursor_for_cursor_user.assert_called_with(True)
+        self.assertFalse(self.callbacks)
+
+    def test_analog_check_waits_for_cursor_restoration(self):
+        result = {'pending': False, 'ok': True, 'cursor': {'pending': True, 'ok': False}}
+        self.assertTrue(json.loads(self.input.check_analog(result))['pending'])
+        result['cursor'].update(pending=False, ok=True)
+        self.assertTrue(json.loads(self.input.check_analog(result))['ok'])
+
+    def test_key_uses_one_guard_and_can_opt_out(self):
+        self.lib.key_down.return_value = json.dumps({'success': True, 'request_id': 10})
+        self.lib.key_up.return_value = json.dumps({'success': True, 'request_id': 11})
+        self.input.key('Gamepad_LeftShoulder')
+        self.input.preserve_cursor.assert_called_once()
+        self.input.preserve_cursor.reset_mock()
+        self.lib.wait_input.side_effect = None
+        self.lib.wait_input.return_value = json.dumps({'success': True, 'request_id': 12})
+        self.input.key('Gamepad_LeftShoulder', protect_cursor=False)
+        self.input.preserve_cursor.assert_not_called()
+
+    def test_cursor_registration_failure_restores_binding(self):
+        with mock.patch.object(self.unreal, 'register_slate_post_tick_callback', side_effect=RuntimeError('register failed')):
+            with self.assertRaisesRegex(RuntimeError, 'register failed'):
+                self.preserve_cursor(lambda: False)
+        self.lib.use_platform_cursor_for_cursor_user.assert_called_with(True)
 
     def test_raw_event_has_no_hold_or_pairing(self):
         result = self.input.analog_input('Gamepad_LeftX', 0.4, 0)

@@ -106,6 +106,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
 	static FString AnalogInput(const FString& KeyName, float Value, int32 DeviceId = -1);
 
+	/** 对标 Slate 的平台/虚拟光标选择；返回切换前位置和平台光标类型，生命周期由 lib 管理 */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
+	static FString UsePlatformCursorForCursorUser(bool bUsePlatformCursor);
+
+	/** 对标 Slate 光标位置接口；虚拟光标模式下不移动系统光标 */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
+	static FString SetCursorPosition(float X, float Y);
+
+	/** 对标 SlateUser 光标可见性接口 */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
+	static FString SetCursorVisibility(bool bVisible);
+
 	/**
 	 * 先把指针移到坐标处，再按下鼠标键并保持，直到 MouseUp / ReleaseAllInput
 	 * @param bDoubleClick 以双击事件代替按下（双击 = 按下、抬起、双击按下、抬起）

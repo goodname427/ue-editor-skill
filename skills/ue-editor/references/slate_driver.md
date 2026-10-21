@@ -101,6 +101,9 @@ C++ 只提供下表这些原子步骤，**点击、长按、按键、拖动、�
 | `key_down(key, ctrl, shift, alt, max_hold=30)` | 数字键按下并保持；普通退格额外发字符码 8；模拟轴不可用此接口 | `handled`, `device_id`, `platform_user`, `slate_user` |
 | `analog_input(key, value, device_id=-1)` | **同步单事件**，调用 `OnControllerAnalog`；只接 gamepad Axis1D，-1 取默认映射；不配对、不保持、不自动归零 | `handled`, `device_id`, `platform_user`, `slate_user` |
 | `key_up(key)` | 抬起 `key_down` 按住的键；没按住时失败 | — |
+| `use_platform_cursor_for_cursor_user(use_platform)` | 对标引擎平台/虚拟光标选择；同步操作，不自行定时恢复 | 切换前 `pos`, 平台 `visible` |
+| `set_cursor_position(x, y)` | 对标 Slate 光标位置；使用虚拟光标时不移动 OS 光标 | — |
+| `set_cursor_visibility(visible)` | 对标 SlateUser 显隐；作用于当前绑定光标 | — |
 | `mouse_down(x, y, button, double, check_locator, window, index, max_hold=30)` | 先把指针移到落点再按下；`double=True` 时发双击事件。校验目标/子节点；透明目标也可命中实际祖先，但目标几何须包含落点、路径可见且可用。相邻/遮挡/禁用仍失败、不发按下 | `hit`, `hit_via`（仅祖先路由） |
 | `mouse_up(button)` | 在当前指针位置抬起 | `pos`, `hit` |
 | `mouse_move(x, y, frames=1)` | 分 `frames` 帧线性移过去；有键按住时就是拖动。最后一步后保持悬停 10 秒，后续 move 续期；不会移动系统光标 | `pos`, `hit`, `dragging`, `hover_seconds` |
@@ -152,3 +155,11 @@ ue_input.key_down('W'); ue_input.wait(1.5); ue_input.key_up('W')   # 等价于 k
 - 连续多个操作用 sequence 分步并等待本次 check 完成；不要并发向同一摇杆启动多个 hold。保持最长 30 秒，不提供默认无限持轴或全局注册管理器。
 - 摇杆值为 [-1,1]，扳机为 [0,1]；不接 Axis2D 合成键，不在 Skill 预先翻转 RightY，也不自动把 TriggerAxis 转成数字扳机键。
 - `handled`、设备切换、调试日志或键盘焦点单独都不是输入验收终态。导航看项目焦点/选中状态，UI 动作看目标效果，gameplay 读 PlayerInput；默认设备存在不等价于 OS 有物理手柄或型号已识别。
+
+### 临时保护用户系统光标
+
+- `ui key/keydown/analog/analogset` 默认通过 lib 使用引擎虚拟光标，把导航的移动/隐藏写到虚拟光标，不改项目设备类型或导航逻辑。组合结束再留两次 Slate 回调，让后续焦点跟随 Tick 完成，随后恢复平台绑定及进入时的显隐。
+- 不把系统鼠标搬回旧坐标；用户期间移动鼠标时，退出隔离仍使用用户当前真实位置。超时/异常尽力恢复并报告，不永久关闭输入或光标。
+- 真正验证光标跟随、显隐或捕获时，加 `--allow-cursor-takeover`；脚本对应 `protect_cursor=False`。原生 C++ `KeyDown/AnalogInput` 和 lib `analog_input` 没有自动保护，保留原子行为。
+- lib `preserve_cursor(done, timeout)` 的完成判据必须只读。状态只在本次闭包持有；不嵌套、不并发隔离，也不覆盖外部已启用的虚拟光标。多段操作用 sequence 分步等恢复终态；自定义批量操作只创建一个外围范围，内部调用设 `protect_cursor=False`。
+- 保护针对 Slate cursor-user 路径；不拦截任意 OS API、真实物理输入或所有游戏捕获路径。键鼠鼠标点击/拖动的旧行为不变。

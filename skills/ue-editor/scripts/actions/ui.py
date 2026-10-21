@@ -40,6 +40,8 @@
   hover 只是 Slate IsHovered，不证明业务 Tips 出现；用 --wait-until 等已确认的浮窗，再查询/截图。原生 ToolTip 另有真实光标条件。
 - scroll 返回 handled / moved：handled 是事件路径上有没有控件处理滚轮，moved 才是内容是否移动；
   容器 ConsumeMouseWheel=Never 时 handled 可能为 true 而 moved=false。不能只看 queued。
+- key / keydown / analog / analogset 默认临时隔离平台光标，防止项目设备切换把系统鼠标拉进 PIE 或隐藏；
+  要验证真实光标接管，加 --allow-cursor-takeover。隔离只在本次调用和后续两帧有效，不关导航、不修改项目。
 - 长按：click / key 加 --hold=秒（按住这么久再抬起，命令在抬起后才返回）。按住直到某个条件成立：
   keydown/mousedown 加 CLI 的 --wait-until 等条件，再 keyup/mouseup；键盘有现成清单 sequence --action hold-until。
   中途失败也不会一直按着：--max-hold 秒（默认 30）后自动抬起，或手动 ui release。
@@ -177,7 +179,9 @@ elif cmd == 'key':
     if OPTS.get('focus'):
         print('queued: focus ' + line(ue_input.focus(OPTS['focus'], window, index)['focusable']))
     hold = float(OPTS.get('hold', 0))
-    r = ue_input.key(ARGS[1], *mods, hold=hold)
+    r = ue_input.key(ARGS[1], *mods, hold=hold, protect_cursor=not OPTS.get('allow_cursor_takeover'))
+    if r.get('cursor'):
+        ue_input.check('__import__("json").dumps(r["cursor"])')
     name = '+'.join([m for m, on in zip(('ctrl', 'shift', 'alt'), mods) if on] + [ARGS[1]])
     print('queued: %s%s; focus before input: %s' % (name, ' held %gs' % hold if hold else '', line(r['focus'])))
 
@@ -194,19 +198,25 @@ elif cmd in ('analog', 'analogset'):
         values[name] = float(value)
     device = int(OPTS.get('device', -1))
     if cmd == 'analog':
-        analog_result = ue_input.analog(values, hold=float(OPTS.get('hold', 0)), device_id=device)
+        analog_result = ue_input.analog(values, hold=float(OPTS.get('hold', 0)), device_id=device,
+                                        protect_cursor=not OPTS.get('allow_cursor_takeover'))
         ue_input.check('__import__("ue_input").check_analog(analog_result)')
         print('queued: analog %r, then neutral' % values)
     else:
         if 'hold' in OPTS:
             raise ValueError('analogset has no hold; use analog for a timed pulse')
-        print('processed: %r; send zero explicitly to neutralize' % ue_input.analog_set(values, device))
+        analog_set_result = ue_input.analog_set(values, device, protect_cursor=not OPTS.get('allow_cursor_takeover'))
+        if analog_set_result.get('cursor'):
+            ue_input.check('__import__("json").dumps(analog_set_result["cursor"])')
+        print('processed: %r; send zero explicitly to neutralize' % analog_set_result)
 
 elif cmd in ('keydown', 'keyup'):
     if len(ARGS) < 2:
         raise RuntimeError(__doc__)
     if cmd == 'keydown':
-        r = ue_input.key_down(ARGS[1], *mods, max_hold=max_hold)
+        r = ue_input.key_down(ARGS[1], *mods, max_hold=max_hold, protect_cursor=not OPTS.get('allow_cursor_takeover'))
+        if r.get('cursor'):
+            ue_input.check('__import__("json").dumps(r["cursor"])')
         print('queued: hold %s (auto release after %gs if not released); focus before input: %s' % (ARGS[1], max_hold, line(r['focus'])))
     else:
         ue_input.key_up(ARGS[1])

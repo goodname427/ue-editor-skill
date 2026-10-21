@@ -119,8 +119,15 @@ def read_text(locator, window='', index=0):
 
 # ---------- 原子步骤 ----------
 
-def key_down(name, ctrl=False, shift=False, alt=False, max_hold=MAX_HOLD):
-    return _queued(LIB.key_down(name, ctrl, shift, alt, max_hold))
+def key_down(name, ctrl=False, shift=False, alt=False, max_hold=MAX_HOLD, protect_cursor=True):
+    end = {}
+    guard = preserve_cursor(lambda: 'request_id' not in end or not json.loads(LIB.get_input_result(end['request_id'])).get('pending', False)) if protect_cursor else None
+    result = _queued(LIB.key_down(name, ctrl, shift, alt, max_hold))
+    end.update(result)
+    if guard:
+        result['cursor'] = guard
+        wait(0, 3)
+    return result
 
 
 def key_up(name):
@@ -165,6 +172,49 @@ def release_all():
 
 # ---------- 组合 ----------
 
+def preserve_cursor(done, timeout=35.0):
+    """临时使用引擎虚拟光标，完成后再留两帧给导航 Tick；不回写系统鼠标位置。"""
+    original = parse(LIB.use_platform_cursor_for_cursor_user(False))
+    state = {'pending': True, 'ok': False, 'wait': timeout + 1}
+    timer = {'handle': None, 'settled': 0, 'deadline': time.monotonic() + timeout}
+    try:
+        parse(LIB.set_cursor_position(*original['pos']))
+    except Exception:
+        parse(LIB.use_platform_cursor_for_cursor_user(True))
+        raise
+
+    def restore(message=''):
+        try:
+            parse(LIB.set_cursor_visibility(original['visible']))
+        except Exception as error:
+            message = message or str(error)
+        finally:
+            try:
+                parse(LIB.use_platform_cursor_for_cursor_user(True))
+            except Exception as error:
+                message = message or str(error)
+            unreal.unregister_slate_post_tick_callback(timer['handle'])
+            state.update(pending=False, ok=not message, message=message)
+
+    def tick(delta):
+        try:
+            if time.monotonic() >= timer['deadline']:
+                restore('Cursor isolation timed out')
+            elif done():
+                timer['settled'] += 1
+                if timer['settled'] >= 2:
+                    restore()
+        except Exception as error:
+            restore(str(error))
+
+    try:
+        timer['handle'] = unreal.register_slate_post_tick_callback(tick)
+    except Exception:
+        parse(LIB.use_platform_cursor_for_cursor_user(True))
+        raise
+    return state
+
+
 def _press_point(locator, at, window, index, check, expect_hit):
     """落点与校验对象：给 at 时用坐标、只按 expect_hit 校验；否则用控件中心、默认校验该控件。"""
     if at is not None:
@@ -189,11 +239,22 @@ def click(locator=None, at=None, window='', index=0, button='Left', double=False
     return {'target': target, 'pos': (x, y), 'hit': down.get('hit')}
 
 
-def key(name, ctrl=False, shift=False, alt=False, hold=0.0):
-    """按一下键（按下后至少隔两帧抬起），hold 秒时为长按。返回按下时的排队结果（含排队时的 focus）。"""
-    down = key_down(name, ctrl, shift, alt, MAX_HOLD + hold)
-    wait(hold, 1)
-    key_up(name)
+def key(name, ctrl=False, shift=False, alt=False, hold=0.0, protect_cursor=True):
+    """按下/等待/抬起；默认隔离系统光标，测试真实光标行为时设 protect_cursor=False。"""
+    end = {}
+    def done():
+        return 'request_id' not in end or not json.loads(LIB.get_input_result(end['request_id'])).get('pending', False)
+    guard = preserve_cursor(done, MAX_HOLD + hold + 5) if protect_cursor else None
+    try:
+        down = key_down(name, ctrl, shift, alt, MAX_HOLD + hold, protect_cursor=False)
+        wait(hold, 1)
+        end.update(key_up(name))
+    except Exception:
+        end.clear()
+        raise
+    if guard:
+        down['cursor'] = guard
+        wait(0, 3)
     return down
 
 
@@ -221,10 +282,12 @@ def _analog_values(values):
     return out
 
 
-def analog_set(values, device_id=-1):
+def analog_set(values, device_id=-1, protect_cursor=True):
     """校验整批后同帧发单轴事件，摇杆补齐另一轴；不保持、不自动归零。"""
     values = _analog_values(values)
     sent, result = [], {'values': values, 'handled': False}
+    if protect_cursor:
+        result['cursor'] = preserve_cursor(lambda: True)
     try:
         for name, value in values.items():
             event = analog_input(name, value, device_id)
@@ -245,7 +308,7 @@ def analog_set(values, device_id=-1):
     return result
 
 
-def analog(values, hold=0.0, device_id=-1):
+def analog(values, hold=0.0, device_id=-1, protect_cursor=True):
     """Slate 回调逐帧采样后归零；返回本次组合结果，调用方用 check_analog 等待。"""
     values = _analog_values(values)
     hold = float(hold)
@@ -253,6 +316,8 @@ def analog(values, hold=0.0, device_id=-1):
         raise ValueError('analog hold must be in [0, %g]' % MAX_HOLD)
     gate = wait(0, 1)
     result = {'pending': True, 'ok': False, 'wait': hold + 5, 'samples': 0, 'handled': False, 'values': values}
+    if protect_cursor:
+        result['cursor'] = preserve_cursor(lambda: not result['pending'], hold + 5)
     timer = {'handle': None, 'start': None, 'device': device_id, 'cancelled': False}
     editor = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
     was_pie = editor.is_in_play_in_editor()
@@ -291,7 +356,7 @@ def analog(values, hold=0.0, device_id=-1):
             if result['samples'] and time.monotonic() - timer['start'] >= hold:
                 finish()
                 return
-            event = analog_set(values, timer['device'])
+            event = analog_set(values, timer['device'], protect_cursor=False)
             timer['device'] = event['device_id']
             result.update(device_id=event['device_id'], platform_user=event['platform_user'], slate_user=event['slate_user'])
             result['handled'] |= event['handled']
@@ -306,7 +371,14 @@ def analog(values, hold=0.0, device_id=-1):
 
 
 def check_analog(result):
-    return json.dumps({key: value for key, value in result.items() if key != 'cancel'}, ensure_ascii=False)
+    state = {key: value for key, value in result.items() if key != 'cancel'}
+    guard = result.get('cursor')
+    if guard and not result['pending']:
+        state['pending'] = guard['pending']
+        state['ok'] = result['ok'] and guard['ok']
+        if not guard['ok'] and not guard['pending']:
+            state['message'] = guard.get('message', 'Cursor isolation failed')
+    return json.dumps(state, ensure_ascii=False)
 
 
 def drag(start, end, frames=20, button='Left', check_locator='', window='', index=0):
