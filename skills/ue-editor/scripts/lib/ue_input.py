@@ -173,10 +173,10 @@ def release_all():
 # ---------- 组合 ----------
 
 def preserve_cursor(done, timeout=35.0):
-    """临时使用引擎虚拟光标，完成后再留两帧给导航 Tick；不回写系统鼠标位置。"""
+    """临时使用引擎虚拟光标，完成后至少留两帧和 0.2 秒；不回写系统鼠标位置。"""
     original = parse(LIB.use_platform_cursor_for_cursor_user(False))
     state = {'pending': True, 'ok': False, 'wait': timeout + 1}
-    timer = {'handle': None, 'settled': 0, 'deadline': time.monotonic() + timeout}
+    timer = {'handle': None, 'settled': 0, 'settle_start': None, 'deadline': time.monotonic() + timeout}
     try:
         parse(LIB.set_cursor_position(*original['pos']))
     except Exception:
@@ -201,8 +201,10 @@ def preserve_cursor(done, timeout=35.0):
             if time.monotonic() >= timer['deadline']:
                 restore('Cursor isolation timed out')
             elif done():
+                if timer['settle_start'] is None:
+                    timer['settle_start'] = time.monotonic()
                 timer['settled'] += 1
-                if timer['settled'] >= 2:
+                if timer['settled'] >= 2 and time.monotonic() - timer['settle_start'] >= 0.2:
                     restore()
         except Exception as error:
             restore(str(error))

@@ -41,7 +41,7 @@
 - scroll 返回 handled / moved：handled 是事件路径上有没有控件处理滚轮，moved 才是内容是否移动；
   容器 ConsumeMouseWheel=Never 时 handled 可能为 true 而 moved=false。不能只看 queued。
 - key / keydown / analog / analogset 默认临时隔离平台光标，防止项目设备切换把系统鼠标拉进 PIE 或隐藏；
-  要验证真实光标接管，加 --allow-cursor-takeover。隔离只在本次调用和后续两帧有效，不关导航、不修改项目。
+  要验证真实光标接管，加 --allow-cursor-takeover。隔离覆盖本次调用，结束后至少留两帧和 0.2 秒，不关导航、不修改项目。
 - 长按：click / key 加 --hold=秒（按住这么久再抬起，命令在抬起后才返回）。按住直到某个条件成立：
   keydown/mousedown 加 CLI 的 --wait-until 等条件，再 keyup/mouseup；键盘有现成清单 sequence --action hold-until。
   中途失败也不会一直按着：--max-hold 秒（默认 30）后自动抬起，或手动 ui release。

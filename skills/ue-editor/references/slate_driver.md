@@ -158,7 +158,7 @@ ue_input.key_down('W'); ue_input.wait(1.5); ue_input.key_up('W')   # 等价于 k
 
 ### 临时保护用户系统光标
 
-- `ui key/keydown/analog/analogset` 默认通过 lib 使用引擎虚拟光标，把导航的移动/隐藏写到虚拟光标，不改项目设备类型或导航逻辑。组合结束再留两次 Slate 回调，让后续焦点跟随 Tick 完成，随后恢复平台绑定及进入时的显隐。
+- `ui key/keydown/analog/analogset` 默认通过 lib 使用引擎虚拟光标，把导航的移动/隐藏写到虚拟光标，不改项目设备类型或导航逻辑。组合结束后至少保留两次 Slate 回调和 0.2 秒尾部窗口，覆盖常见短延迟焦点落地，再恢复平台绑定及进入时的显隐。这是有界操作级规避，不保证任意长的异步页面/导航会话；较长异步操作应把真实就绪状态纳入外围 `done` 判据。
 - 不把系统鼠标搬回旧坐标；用户期间移动鼠标时，退出隔离仍使用用户当前真实位置。超时/异常尽力恢复并报告，不永久关闭输入或光标。
 - 真正验证光标跟随、显隐或捕获时，加 `--allow-cursor-takeover`；脚本对应 `protect_cursor=False`。原生 C++ `KeyDown/AnalogInput` 和 lib `analog_input` 没有自动保护，保留原子行为。
 - lib `preserve_cursor(done, timeout)` 的完成判据必须只读。状态只在本次闭包持有；不嵌套、不并发隔离，也不覆盖外部已启用的虚拟光标。多段操作用 sequence 分步等恢复终态；自定义批量操作只创建一个外围范围，内部调用设 `protect_cursor=False`。

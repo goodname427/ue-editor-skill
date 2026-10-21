@@ -63,7 +63,7 @@ class AnalogTests(unittest.TestCase):
         for callback in list(self.callbacks.values()):
             callback(1 / 60)
 
-    def test_cursor_isolation_restores_after_two_post_ticks_without_warp(self):
+    def test_cursor_isolation_covers_async_focus_before_restore(self):
         finished = {'done': False}
         guard = self.preserve_cursor(lambda: finished['done'])
         self.lib.use_platform_cursor_for_cursor_user.assert_called_once_with(False)
@@ -74,6 +74,9 @@ class AnalogTests(unittest.TestCase):
         self.tick(0.2)
         self.assertTrue(guard['pending'])
         self.tick(0.3)
+        self.assertTrue(guard['pending'])
+        self.lib.use_platform_cursor_for_cursor_user.assert_called_once_with(False)
+        self.tick(0.41)
         self.assertTrue(guard['ok'])
         self.assertFalse(guard['pending'])
         self.lib.set_cursor_visibility.assert_called_once_with(True)
@@ -93,7 +96,7 @@ class AnalogTests(unittest.TestCase):
         guard = self.preserve_cursor(lambda: True)
         self.lib.set_cursor_visibility.side_effect = RuntimeError('visibility failed')
         self.tick(0.1)
-        self.tick(0.2)
+        self.tick(0.31)
         self.assertFalse(guard['ok'])
         self.assertIn('visibility failed', guard['message'])
         self.lib.use_platform_cursor_for_cursor_user.assert_called_with(True)
