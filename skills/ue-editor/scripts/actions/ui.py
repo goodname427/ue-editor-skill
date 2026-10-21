@@ -14,6 +14,8 @@
   按住 / 抬起 / 移动：
   exec --action ui keydown <键名> [--ctrl] [--shift] [--alt] [--max-hold=30]           按住不放，直到 keyup / release；--max-hold 秒后自动抬起
   exec --action ui keyup <键名>
+  exec --action ui analog Gamepad_LeftX=1 [Gamepad_LeftY=0] [--hold=秒] [--device=ID]    逐帧采样后自动归零，hold 默认 0（一次脉冲）
+  exec --action ui analogset Gamepad_LeftX=1 [Gamepad_LeftY=0] [--device=ID]             单次设值，必须自行发 0，不自动保持/归零
   exec --action ui mousedown <Locator> [--index=N] [--right|--middle] [--max-hold=30]   或 --at=x,y；控件模式校验落点未被遮挡
   exec --action ui mouseup [--right|--middle]
   exec --action ui move <Locator> [--index=N] [--frames=1]                      或 --at=x,y；按着鼠标键时就是拖动
@@ -95,7 +97,7 @@ def print_target(node):
 
 
 cmd = ARGS[0] if ARGS else ''
-for key in ('index', 'depth', 'max', 'delta', 'at', 'window', 'focus', 'expect_hit', 'hold', 'max_hold', 'frames', 'to', 'to_target'):
+for key in ('index', 'depth', 'max', 'delta', 'at', 'window', 'focus', 'expect_hit', 'hold', 'max_hold', 'frames', 'to', 'to_target', 'device'):
     if OPTS.get(key) is True:
         raise RuntimeError('--%s needs a value; use --%s=<value>, not --%s <value>' % (key, key, key))
 window = OPTS.get('window', '')
@@ -178,6 +180,27 @@ elif cmd == 'key':
     r = ue_input.key(ARGS[1], *mods, hold=hold)
     name = '+'.join([m for m, on in zip(('ctrl', 'shift', 'alt'), mods) if on] + [ARGS[1]])
     print('queued: %s%s; focus before input: %s' % (name, ' held %gs' % hold if hold else '', line(r['focus'])))
+
+elif cmd in ('analog', 'analogset'):
+    if len(ARGS) < 2:
+        raise RuntimeError(__doc__)
+    if any(name in OPTS for name in ('focus', 'max_hold', 'ctrl', 'shift', 'alt')):
+        raise ValueError('analog uses --hold/--device, not keyboard focus/modifiers or --max-hold')
+    values = {}
+    for item in ARGS[1:]:
+        name, separator, value = item.partition('=')
+        if not separator or name in values:
+            raise ValueError('supply unique axis=value arguments')
+        values[name] = float(value)
+    device = int(OPTS.get('device', -1))
+    if cmd == 'analog':
+        analog_result = ue_input.analog(values, hold=float(OPTS.get('hold', 0)), device_id=device)
+        ue_input.check('__import__("ue_input").check_analog(analog_result)')
+        print('queued: analog %r, then neutral' % values)
+    else:
+        if 'hold' in OPTS:
+            raise ValueError('analogset has no hold; use analog for a timed pulse')
+        print('processed: %r; send zero explicitly to neutralize' % ue_input.analog_set(values, device))
 
 elif cmd in ('keydown', 'keyup'):
     if len(ARGS) < 2:

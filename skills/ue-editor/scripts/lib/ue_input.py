@@ -10,12 +10,17 @@ Skill 的 ui Lib 和项目脚本都 import 这里，不要在别处再拼一遍�
   ue_input.input_text('name=EditableTextBox_Num', '5', commit=True)
   ue_input.scroll(x, y, -3)
   ue_input.drag((x0, y0), (x1, y1), frames=20)
+  job = ue_input.analog({'Gamepad_LeftX': 1}, hold=0.5)
+  ue_input.check('__import__("ue_input").check_analog(job)')
 
-原子步骤排在 C++ 的同一条时间线上：前一步完成才执行下一步，失败时取消其后所有步骤。
+键鼠原子步骤排在 C++ 的同一条时间线上；AnalogInput 是同步单事件，配对与逐帧采样用本 lib 的 Slate 回调组合。
 每步打印 `[input-request] <id> [秒]`，需要回读的组合再打印 `[input-check] <表达式>`；
 ue_cli 执行完脚本后按顺序等这些结果，失败时报 InputAssertionFailed。调用方不要自己 sleep 或轮询。
 """
 import json
+import math
+import time
+import unreal
 from ue_common import parse, require
 
 LIB = require('AgentSlateDriverFunctionLib')
@@ -190,6 +195,118 @@ def key(name, ctrl=False, shift=False, alt=False, hold=0.0):
     wait(hold, 1)
     key_up(name)
     return down
+
+
+def analog_input(name, value, device_id=-1):
+    """同步发送单个轴事件；这是原子操作，非零值由调用方负责归零。"""
+    return parse(LIB.analog_input(name, value, device_id))
+
+
+def _analog_values(values):
+    axes = ('Gamepad_LeftX', 'Gamepad_LeftY', 'Gamepad_RightX', 'Gamepad_RightY',
+            'Gamepad_LeftTriggerAxis', 'Gamepad_RightTriggerAxis')
+    if not isinstance(values, dict) or not values:
+        raise ValueError('analog needs a nonempty key/value dict')
+    out = {}
+    for name, value in values.items():
+        value = float(value)
+        minimum = 0 if name.endswith('TriggerAxis') else -1
+        if name not in axes or not math.isfinite(value) or not minimum <= value <= 1:
+            raise ValueError('invalid gamepad axis/value: %s' % name)
+        out[name] = value
+    for x, y in (axes[:2], axes[2:4]):
+        if x in out or y in out:
+            out.setdefault(x, 0.0)
+            out.setdefault(y, 0.0)
+    return out
+
+
+def analog_set(values, device_id=-1):
+    """校验整批后同帧发单轴事件，摇杆补齐另一轴；不保持、不自动归零。"""
+    values = _analog_values(values)
+    sent, result = [], {'values': values, 'handled': False}
+    try:
+        for name, value in values.items():
+            event = analog_input(name, value, device_id)
+            device_id = event['device_id']
+            sent.append(name)
+            result.update(device_id=device_id, platform_user=event['platform_user'], slate_user=event['slate_user'])
+            result['handled'] |= event['handled']
+    except Exception as error:
+        cleanup_errors = []
+        for name in sent:
+            try:
+                analog_input(name, 0.0, device_id)
+            except Exception as cleanup_error:
+                cleanup_errors.append(str(cleanup_error))
+        if cleanup_errors:
+            raise RuntimeError('%s; neutralizing failed: %s' % (error, '; '.join(cleanup_errors))) from error
+        raise
+    return result
+
+
+def analog(values, hold=0.0, device_id=-1):
+    """Slate 回调逐帧采样后归零；返回本次组合结果，调用方用 check_analog 等待。"""
+    values = _analog_values(values)
+    hold = float(hold)
+    if not math.isfinite(hold) or not 0 <= hold <= MAX_HOLD:
+        raise ValueError('analog hold must be in [0, %g]' % MAX_HOLD)
+    gate = wait(0, 1)
+    result = {'pending': True, 'ok': False, 'wait': hold + 5, 'samples': 0, 'handled': False, 'values': values}
+    timer = {'handle': None, 'start': None, 'device': device_id, 'cancelled': False}
+    editor = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+    was_pie = editor.is_in_play_in_editor()
+
+    def finish(message=''):
+        if not result['pending']:
+            return
+        try:
+            if result['samples']:
+                for name in values:
+                    try:
+                        analog_input(name, 0.0, timer['device'])
+                    except Exception as error:
+                        message = message or str(error)
+        finally:
+            unreal.unregister_slate_post_tick_callback(timer['handle'])
+            result.update(pending=False, ok=not message, message=message)
+
+    def tick(delta):
+        try:
+            if timer['cancelled']:
+                finish('Analog input cancelled')
+                return
+            if was_pie and not editor.is_in_play_in_editor():
+                finish('PIE ended during analog input')
+                return
+            state = json.loads(LIB.get_input_result(gate['request_id']))
+            tail_state = json.loads(LIB.get_input_result(timer['tail']['request_id']))
+            if not state.get('success') or not tail_state.get('success'):
+                finish(state.get('message') or tail_state.get('message', 'Input timeline was cancelled'))
+                return
+            if state.get('pending'):
+                return
+            if timer['start'] is None:
+                timer['start'] = time.monotonic()
+            if result['samples'] and time.monotonic() - timer['start'] >= hold:
+                finish()
+                return
+            event = analog_set(values, timer['device'])
+            timer['device'] = event['device_id']
+            result.update(device_id=event['device_id'], platform_user=event['platform_user'], slate_user=event['slate_user'])
+            result['handled'] |= event['handled']
+            result['samples'] += 1
+        except Exception as error:
+            finish(str(error))
+
+    result['cancel'] = lambda: timer.update(cancelled=True)
+    timer['handle'] = unreal.register_slate_post_tick_callback(tick)
+    timer['tail'] = wait(hold, 2)
+    return result
+
+
+def check_analog(result):
+    return json.dumps({key: value for key, value in result.items() if key != 'cancel'}, ensure_ascii=False)
 
 
 def drag(start, end, frames=20, button='Left', check_locator='', window='', index=0):

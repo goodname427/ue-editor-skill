@@ -189,6 +189,15 @@ def _input_check(bridge, expr, result):
             raise ValueError('input check must return a JSON object with ok')
     except (ValueError, SyntaxError) as e:
         return {'status': 'error', 'error_type': 'InvalidResponse', 'message': str(e), 'command_sent': True}
+    if state.get('pending'):
+        seconds = state.get('wait', 5)
+        if not isinstance(seconds, (int, float)) or not 0 < seconds <= 3600:
+            return {'status': 'error', 'error_type': 'InvalidResponse', 'message': 'pending input check needs a finite wait in (0, 3600]', 'command_sent': True}
+        condition = 'not __import__("json").loads((%s)).get("pending", False)' % expr
+        waited = _poll(bridge, condition, time.monotonic() + seconds)
+        if waited['status'] != 'ok':
+            return dict(waited, error_type=waited.get('error_type', 'InputWaitTimeout'), output=result.get('output', ''), command_sent=True)
+        return _input_check(bridge, expr, result)
     if not state['ok']:
         return {'status': 'error', 'error_type': 'InputAssertionFailed', 'message': state.get('message') or 'Input check failed',
                 'input': state, 'output': result.get('output', ''), 'command_sent': True}

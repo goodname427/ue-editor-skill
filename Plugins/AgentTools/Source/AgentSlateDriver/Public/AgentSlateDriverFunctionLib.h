@@ -102,6 +102,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
 	static FString KeyUp(const FString& KeyName);
 
+	/** 同步发送一个手柄 Axis1D 事件；DeviceId=-1 使用默认映射，保持/配对/归零由 lib 组合 */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
+	static FString AnalogInput(const FString& KeyName, float Value, int32 DeviceId = -1);
+
 	/**
 	 * 先把指针移到坐标处，再按下鼠标键并保持，直到 MouseUp / ReleaseAllInput
 	 * @param bDoubleClick 以双击事件代替按下（双击 = 按下、抬起、双击按下、抬起）

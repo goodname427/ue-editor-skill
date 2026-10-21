@@ -8,6 +8,7 @@
 #include "Engine/World.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Application/SlateUser.h"
+#include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
 #include "HAL/IConsoleManager.h"
 #include "InputCoreTypes.h"
 #include "Layout/ArrangedChildren.h"
@@ -1094,6 +1095,38 @@ static void SDArmWatchdog(const FKey& Key, int32 Serial, float MaxHoldSeconds)
 	}));
 }
 
+// ==================== 手柄模拟轴 ====================
+
+FString UAgentSlateDriverFunctionLib::AnalogInput(const FString& KeyName, float Value, int32 DeviceId)
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return SDResult(false, TEXT("Slate is not initialized"));
+	}
+	const FKey Key(*KeyName);
+	const bool bTrigger = Key == EKeys::Gamepad_LeftTriggerAxis || Key == EKeys::Gamepad_RightTriggerAxis;
+	if (!Key.IsGamepadKey() || !Key.IsAxis1D() || !FMath::IsFinite(Value) || Value < (bTrigger ? 0.f : -1.f) || Value > 1.f || DeviceId < -1)
+	{
+		return SDResult(false, TEXT("Supply a gamepad Axis1D key, a finite value in range, and a valid device id"));
+	}
+	IPlatformInputDeviceMapper& Mapper = IPlatformInputDeviceMapper::Get();
+	const FInputDeviceId Device = DeviceId == -1 ? Mapper.GetDefaultInputDevice() : FInputDeviceId::CreateFromInternalId(DeviceId);
+	const FPlatformUserId User = Mapper.GetUserForInputDevice(Device);
+	const TOptional<int32> SlateUser = FSlateApplication::Get().GetUserIndexForInputDevice(Device);
+	if (!Device.IsValid() || !User.IsValid() || !SlateUser.IsSet() || SlateUser.GetValue() < 0)
+	{
+		return SDResult(false, TEXT("Input device has no valid platform/Slate user mapping"));
+	}
+	bool bHandled = false;
+	SDWithBackgroundInput([&](FSlateApplication& SlateApp)
+	{
+		bHandled = SlateApp.OnControllerAnalog(Key.GetFName(), User, Device, Value);
+	});
+	return SDResult(true, FString(), {AgentJson::PairBool(TEXT("handled"), bHandled),
+		AgentJson::PairInt(TEXT("device_id"), Device.GetId()), AgentJson::PairInt(TEXT("platform_user"), User.GetInternalId()),
+		AgentJson::PairInt(TEXT("slate_user"), SlateUser.GetValue())});
+}
+
 // 会接收鼠标按下的路径：有捕获时是捕获者路径，否则是光标下的命中路径
 static FWidgetPath SDInputPathAt(const FVector2D& Pos)
 {
@@ -1331,6 +1364,10 @@ FString UAgentSlateDriverFunctionLib::KeyDown(const FString& KeyName, bool bCtrl
 	{
 		return SDResult(false, TEXT("Mouse buttons go through MouseDown"));
 	}
+	if (Key.IsGamepadKey() && Key.IsAnalog())
+	{
+		return SDResult(false, TEXT("Gamepad axes go through AnalogInput"));
+	}
 	const int32 RequestId = SDTimelineAdd([Key, bCtrl, bShift, bAlt, MaxHoldSeconds](int32 Id)
 	{
 		if (SDHeldKeys.Contains(Key))
@@ -1350,7 +1387,10 @@ FString UAgentSlateDriverFunctionLib::KeyDown(const FString& KeyName, bool bCtrl
 		const int32 Serial = ++SDNextHoldSerial;
 		SDHoldSerials.Add(Key, Serial);
 		SDArmWatchdog(Key, Serial, MaxHoldSeconds);
-		SDSetInputResult(Id, true, FString(), {AgentJson::PairBool(TEXT("handled"), bHandled)});
+		SDSetInputResult(Id, true, FString(), {AgentJson::PairBool(TEXT("handled"), bHandled),
+			AgentJson::PairInt(TEXT("device_id"), Event.GetInputDeviceId().GetId()),
+			AgentJson::PairInt(TEXT("platform_user"), Event.GetPlatformUserId().GetInternalId()),
+			AgentJson::PairInt(TEXT("slate_user"), static_cast<int32>(Event.GetUserIndex()))});
 		return ESDStep::Done;
 	});
 	return SDQueued(RequestId, {AgentJson::PairRaw(TEXT("focus"), SDDescribeFocus())});

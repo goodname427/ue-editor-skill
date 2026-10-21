@@ -1,8 +1,8 @@
 # Slate 操控 API 参考
 
-> 本文档收录 `UAgentSlateDriverFunctionLib` 提供的 Slate 层操控接口：读取控件树、查找控件、设置焦点、合成鼠标/键盘输入。
+> 本文档收录 `UAgentSlateDriverFunctionLib` 提供的 Slate 层操控接口：读取控件树、查找控件、设置焦点、合成键鼠/手柄输入。
 > 编辑器面板、资产编辑器、弹窗菜单、PIE 视口内的 UMG 使用同一套接口；后台输入边界见 [ui_verify.md](ui_verify.md#pie-游戏界面)。所有函数返回 JSON 字符串。
-> 日常查看与操作优先用 `exec --action ui ...`（输出精简文本，见 `scripts/lib/ui.py` docstring）；脚本里做界面输入用 `import ue_input`，查询可以直接调用本库。
+> 日常查看与操作优先用 `exec --action ui ...`（输出精简文本，见 `scripts/actions/ui.py` docstring）；脚本里做界面输入用 `import ue_input`，查询可以直接调用本库。
 
 ## AgentSlateDriverFunctionLib
 
@@ -23,7 +23,7 @@
 - **window_filter**：只匹配**独立窗口**的标题（主窗口、浮动窗口）。停靠的面板（内容浏览器、细节面板等）都在主窗口里，要用根 Locator 定位，如 `type=SContentBrowser`；同类面板开了多个时用 match index 区分。下拉菜单等弹出层是无标题的独立窗口。
 - **匹配下标**：`match_index` / `--index` 仅对应当次匹配集合，不是控件稳定 ID；页面、导航或列表变化后必须重新查找，不能复用旧下标。
 - **节点字段**：`type`（Slate 类型）、`name`、`class`、`tag`、`text`、`hint`（输入框提示文字）、`rect`；状态字段只在非默认时出现：`vis`（非 Visible）、`enabled: false`、`interactable`、`focus`、`hover`
-- **输入延迟一帧**：输入类接口（含 `focus_widget`）在下一帧按调用顺序执行，返回时尚未生效；点击可能弹出模态对话框，延后执行可避免阻塞本次调用。确认结果要在下一次调用里看（约 0.5 秒后）。
+- **输入执行时机**：键鼠/聚焦步骤排到下一帧，CLI 会回读执行结果，目标响应再用 `--wait-until` 确认。`analog_input` 是同步单事件，不排时间线；配对与持续采样由 `ue_input` 在 Python Slate 回调里组合。
 - 驱动不主动定位系统光标，但事件回包可能请求移动、捕获或锁定光标，不能保证不影响用户鼠标。
 - **焦点**：编辑器窗口不在前台时，点击可能拿不到键盘焦点（实测出现过：点击返回成功，文字却打进了关卡视口）。输入文本或按键前，用 `focus_widget` 直接把焦点设到目标上，不要依赖点击。
 
@@ -98,7 +98,8 @@ C++ 只提供下表这些原子步骤，**点击、长按、按键、拖动、�
 | `focus_widget(locator, window, index)` | 把键盘焦点设到命中的控件；它本身不接受焦点时，取其中第一个可编辑控件。不经过点击路由 | — |
 | `select_all_text()` | 全选当前焦点所在输入框的文字；焦点不是输入框时失败 | — |
 | `type_text(text)` | 向当前焦点逐字发送字符事件（可含中文）；只追加，不清空 | `focus` |
-| `key_down(key, ctrl, shift, alt, max_hold=30)` | 按下并保持；普通退格额外发字符码 8 | `handled` |
+| `key_down(key, ctrl, shift, alt, max_hold=30)` | 数字键按下并保持；普通退格额外发字符码 8；模拟轴不可用此接口 | `handled`, `device_id`, `platform_user`, `slate_user` |
+| `analog_input(key, value, device_id=-1)` | **同步单事件**，调用 `OnControllerAnalog`；只接 gamepad Axis1D，-1 取默认映射；不配对、不保持、不自动归零 | `handled`, `device_id`, `platform_user`, `slate_user` |
 | `key_up(key)` | 抬起 `key_down` 按住的键；没按住时失败 | — |
 | `mouse_down(x, y, button, double, check_locator, window, index, max_hold=30)` | 先把指针移到落点再按下；`double=True` 时发双击事件。校验目标/子节点；透明目标也可命中实际祖先，但目标几何须包含落点、路径可见且可用。相邻/遮挡/禁用仍失败、不发按下 | `hit`, `hit_via`（仅祖先路由） |
 | `mouse_up(button)` | 在当前指针位置抬起 | `pos`, `hit` |
@@ -107,7 +108,7 @@ C++ 只提供下表这些原子步骤，**点击、长按、按键、拖动、�
 | `wait_input(seconds, frames)` | 时间线上等待，秒数和帧数都满足才算完成 | — |
 | `release_all_input()` | **不排队**，下一帧就取消所有未完成的步骤，并抬起本库按住的全部键 | `released` |
 
-- **一条时间线**：除 `release_all_input` 外，每个调用排一步：前一步完成才执行下一步，相邻两步至少隔一帧，某步失败时其后所有步骤取消，结果消息为 `Cancelled because an earlier queued input failed`。所以同一个脚本里连着调用就行，不需要等。
+- **一条时间线**：键鼠步骤（除 `release_all_input`）前一步完成才执行下一步，相邻两步至少隔一帧，失败取消后续。`analog_input` 是同步单事件，不排队，所以 lib 能在同次 Slate 回调发送 X/Y；持续输入由 lib 的 `analog` 完成，不在 C++ 实现组合策略。
 - **排队返回**：`success` 只表示已经排进队列，另含 `request_id`。`mouse_down` 排队时还会返回 `pos`、`hit`（排队那一刻的快照）；带校验时另含 `match_count`、`target`。
 - **防止一直按着**：按住的键记在本库内，到 `max_hold` 秒自动抬起（0 为不限，不建议）。
 - **按住与悬停共用抑制状态**：Slate 会按真实光标位置自动补发移动（`Slate.EnableSyntheticCursorMoves`），取消注入的按下/悬停。本库按住鼠标或最后一次 move 后 10 秒内暂时置 0，续期看最新截止点；悬停到期但还有按键时不恢复，全部抬起、`release_all_input` 或排队输入失败会清除悬停保持。按键与悬停共用一次原值保存，最后一个所有者退出才恢复，原值为 0 也不强制改成 1；写入沿用当前 CVar 优先级，避免手动控制台设置后被拒绝。真实鼠标仍可改变命中，`hit.hover` 不证明业务浮窗显示，见 [ui_verify.md](ui_verify.md#要点)。
@@ -119,6 +120,8 @@ C++ 只提供下表这些原子步骤，**点击、长按、按键、拖动、�
 |---|---|
 | `click(locator=None, at=None, window, index, button, double, hold, check=True, expect_hit=None)` | `mouse_down` →（`hold>0` 时）`wait_input(hold)` → `mouse_up`；`double` 时再加一组 `mouse_down(double=True)` → `mouse_up`。给 `locator` 时落点取控件中心，默认校验该控件；`check=False` 不校验；`expect_hit` 换一个控件做校验；给 `at=(x, y)` 时只有 `expect_hit` 会触发校验 |
 | `key(name, ctrl, shift, alt, hold=0)` | `key_down` → `wait_input(hold, 1)` → `key_up`，抬起至少比按下晚两帧 |
+| `analog_set(values, device_id=-1)` | 先校验整批六类轴键/值；摇杆补齐另一轴，同次调用同步发事件；**不保持、不自动归零** |
+| `analog(values, hold=0, device_id=-1)` | 等待既有时间线 gate → Python Slate 回调逐帧发配对轴 → hold 到期归零并注销；hold 在 0~30 秒，0 为一次脉冲；用 `check_analog(job)` 回读 |
 | `drag(start, end, frames=20, button, check_locator, window, index)` | `mouse_down` → `mouse_move(frames)` → `mouse_up` |
 | `scroll(x, y, delta, frames=8)` | 排队前先用 `widget_at` 记下落点控件 → `mouse_wheel` → `wait_input(0, frames)` → 回读：落点控件的 `type` / `name` / `rect` 变了才算 `moved` |
 | `input_text(locator, text, window, index, replace=True, commit=False)` | `focus_widget` → `select_all_text`（replace 时）→ `type_text` →（commit 时）`key('Enter')` → `wait_input(0, 2)` → 回读文字，不等于预期就失败。追加模式的预期值是旧值加新文字。控件已消失时记为 `(target destroyed)`，视为通过 |
@@ -139,4 +142,13 @@ ue_input.key_down('W'); ue_input.wait(1.5); ue_input.key_up('W')   # 等价于 k
 
 - **数字框**：只在提交时同步业务值的输入框（`OnTextCommitted`）必须 `commit=True`，否则框里显示新值、业务还是旧值。超出业务上下限会被截断，回读失败时 `actual` 就是截断后的值。
 - **滚动判读**：`handled` 只说明事件路径上有控件处理了滚轮，不代表内容动了。容器 `ConsumeMouseWheel=Never` 时会出现 `handled=true, moved=false`，这时改用 `drag` 拖动内容。
-- **焦点**：编辑器窗口不在前台时，点击可能拿不到键盘焦点。输入或按键前用 `focus` 直接设焦点，不要依赖点击。
+- **键盘焦点**：后台文字输入前明确聚焦输入框；手柄导航沿用当前 UI 路由，不强行聚焦业务按钮。`ui focus` 只读 Slate 键盘焦点，不保证等价于项目导航焦点。
+
+### 手柄输入与清理
+
+- C++ `analog_input` 对标引擎单事件接口；`ui analog Axis=value --hold=0.5` 调 lib 做配对、逐帧采样和归零。`ui analogset Axis=value` 只发一次，调用方必须显式送 0；`release_all_input` 不跟踪同步轴事件。
+- `job = ue_input.analog(values, hold)` 的状态只在本次闭包持有，不存 lib 全局跨调用状态；`check_analog(job)` 返回 pending/ok/samples/设备身份。用 `ue_input.check` 等终态；检查只读取状态，不发事件。
+- 正常到期、显式 `job['cancel']()`、本次等待被队列取消、PIE 结束都尝试送 0 并注销回调。显式取消在下一次 Slate 回调归零，避免非零与 0 同帧累加；归零失败如实报告。编辑器暂停/远控超时时不重放，线程恢复后清理。
+- 连续多个操作用 sequence 分步并等待本次 check 完成；不要并发向同一摇杆启动多个 hold。保持最长 30 秒，不提供默认无限持轴或全局注册管理器。
+- 摇杆值为 [-1,1]，扳机为 [0,1]；不接 Axis2D 合成键，不在 Skill 预先翻转 RightY，也不自动把 TriggerAxis 转成数字扳机键。
+- `handled`、设备切换、调试日志或键盘焦点单独都不是输入验收终态。导航看项目焦点/选中状态，UI 动作看目标效果，gameplay 读 PlayerInput；默认设备存在不等价于 OS 有物理手柄或型号已识别。

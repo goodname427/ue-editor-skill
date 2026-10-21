@@ -39,7 +39,7 @@ python scripts/ue_cli.py discover                              # 确认编辑器
 | actions | `scripts/actions/*.py`、`*.sequence.json` | 由 CLI 执行的入口：读 `ARGS` / `OPTS`，调 lib，打印结果，本身尽量薄；`.sequence.json` 是跨帧步骤清单 |
 | lib | `scripts/lib/*.py`（`ue_input`、`ue_wbp`、`ue_common`） | 编辑器内可 `import` 的模块：只定义函数，导入无副作用、不存跨调用状态。界面输入（点击、长按、拖动、文本输入）和 WBP 读写都在这里由 C++ 原子接口拼装，actions 与项目脚本共用，别处不重复实现 |
 | Reference | `references/*.md` | 接口与用法文档，按需读取 |
-| AgentTools | 工程插件 `Plugins/AgentTools`（安装器从本仓库链接进工程） | 只放 Python 访问不到的 C++ 原子能力（Slate 读取与输入步骤、Widget 蓝图读写），仅编辑器。改了函数体用 Live Coding；新增或改了 `UFUNCTION` 签名要重启编辑器 |
+| AgentTools | 工程插件 `Plugins/AgentTools`（安装器从本仓库链接进工程） | C++ API 尽量对标底层引擎原子接口；批量、配对、保持/脉冲等组合放 lib（手柄输入见 `slate_driver.md`）。仅编辑器；改函数体可 Live Coding，新增/改 `UFUNCTION` 签名须重编重启 |
 
 ## 项目 lib / actions / references 的积累
 
