@@ -1,6 +1,7 @@
 #include "AgentSlateDriverFunctionLib.h"
 
 #include "AgentJson.h"
+#include "SlateClippingGeometry.h"
 #include "Containers/Ticker.h"
 #include "CoreGlobals.h"
 #include "Engine/Engine.h"
@@ -76,6 +77,7 @@ static FString SDGetWidgetText(const TSharedRef<SWidget>& Widget)
 	static const FName Type_SEditableText(TEXT("SEditableText"));
 	static const FName Type_SEditableTextBox(TEXT("SEditableTextBox"));
 	static const FName Type_SMultiLineEditableTextBox(TEXT("SMultiLineEditableTextBox"));
+	static const FName Type_SMultiLineEditableText(TEXT("SMultiLineEditableText"));
 	static const FName Type_SInlineEditableTextBlock(TEXT("SInlineEditableTextBlock"));
 	static const FName Type_SDockTab(TEXT("SDockTab"));
 
@@ -100,6 +102,10 @@ static FString SDGetWidgetText(const TSharedRef<SWidget>& Widget)
 	{
 		return StaticCastSharedRef<SMultiLineEditableTextBox>(Widget)->GetText().ToString();
 	}
+	if (Type == Type_SMultiLineEditableText)
+	{
+		return StaticCastSharedRef<SMultiLineEditableText>(Widget)->GetText().ToString();
+	}
 	if (Type == Type_SInlineEditableTextBlock)
 	{
 		return StaticCastSharedRef<SInlineEditableTextBlock>(Widget)->GetText().ToString();
@@ -117,6 +123,8 @@ static FString SDGetWidgetHint(const TSharedRef<SWidget>& Widget)
 	static const FName Type_SEditableText(TEXT("SEditableText"));
 	static const FName Type_SEditableTextBox(TEXT("SEditableTextBox"));
 	static const FName Type_SSearchBox(TEXT("SSearchBox"));
+	static const FName Type_SMultiLineEditableText(TEXT("SMultiLineEditableText"));
+	static const FName Type_SMultiLineEditableTextBox(TEXT("SMultiLineEditableTextBox"));
 
 	const FName Type = Widget->GetType();
 	if (Type == Type_SEditableText)
@@ -126,6 +134,14 @@ static FString SDGetWidgetHint(const TSharedRef<SWidget>& Widget)
 	if (Type == Type_SEditableTextBox || Type == Type_SSearchBox)
 	{
 		return StaticCastSharedRef<SEditableTextBox>(Widget)->GetHintText().ToString();
+	}
+	if (Type == Type_SMultiLineEditableText)
+	{
+		return StaticCastSharedRef<SMultiLineEditableText>(Widget)->GetHintText().ToString();
+	}
+	if (Type == Type_SMultiLineEditableTextBox)
+	{
+		return StaticCastSharedRef<SMultiLineEditableTextBox>(Widget)->GetHintText().ToString();
 	}
 	return FString();
 }
@@ -230,8 +246,9 @@ static FSDWidgetInfo SDMakeInfo(const FArrangedWidget& Arranged)
 	{
 		Info.Label = SDGetWidgetLabel(Widget);
 	}
-	Info.Pos = Arranged.Geometry.GetAbsolutePosition();
-	Info.Size = Arranged.Geometry.GetAbsoluteSize();
+	const FSlateRect Bounds = Arranged.Geometry.GetRenderBoundingRect();
+	Info.Pos = FVector2D(Bounds.Left, Bounds.Top);
+	Info.Size = FVector2D(Bounds.Right - Bounds.Left, Bounds.Bottom - Bounds.Top);
 	return Info;
 }
 
@@ -267,6 +284,10 @@ static TArray<FString> SDNodeFields(const FSDWidgetInfo& Info, const TSharedRef<
 	if (!Info.Text.IsEmpty())
 	{
 		Fields.Add(AgentJson::Pair(TEXT("text"), Info.Text.Len() > 80 ? Info.Text.Left(80) + TEXT("...") : Info.Text));
+		if (Info.Text.Len() > 80)
+		{
+			Fields.Add(AgentJson::Pair(TEXT("text_full"), Info.Text));
+		}
 	}
 	if (!Info.Hint.IsEmpty())
 	{
@@ -528,35 +549,6 @@ static bool SDPushClip(const FArrangedWidget& Arranged, FSlateClippingManager& C
 	return bClipToBounds;
 }
 
-static FSlateRect SDVisibleRect(const FSDWidgetInfo& Info, const FSlateClippingManager& Clipping)
-{
-	FSlateRect Rect(Info.Pos.X, Info.Pos.Y, Info.Pos.X + Info.Size.X, Info.Pos.Y + Info.Size.Y);
-	const TOptional<FSlateClippingState> State = Clipping.GetActiveClippingState();
-	if (State.IsSet())
-	{
-		auto Intersect = [&Rect](const FSlateClippingZone& Zone)
-		{
-			const FSlateRect Bounds = Zone.GetBoundingBox();
-			Rect.Left = FMath::Max(Rect.Left, Bounds.Left);
-			Rect.Top = FMath::Max(Rect.Top, Bounds.Top);
-			Rect.Right = FMath::Max(Rect.Left, FMath::Min(Rect.Right, Bounds.Right));
-			Rect.Bottom = FMath::Max(Rect.Top, FMath::Min(Rect.Bottom, Bounds.Bottom));
-		};
-		if (State->ScissorRect.IsSet())
-		{
-			Intersect(State->ScissorRect.GetValue());
-		}
-		else
-		{
-			for (const FSlateClippingZone& Zone : State->StencilQuads)
-			{
-				Intersect(Zone);
-			}
-		}
-	}
-	return Rect;
-}
-
 struct FSDMatch
 {
 	FString WindowTitle;
@@ -566,6 +558,8 @@ struct FSDMatch
 	bool bGeometryValid = true;
 	bool bClipped = false;
 	FSlateRect VisibleRect;
+	FVector2D VisiblePoint = FVector2D::ZeroVector;
+	bool bHasVisiblePoint = false;
 	FString HiddenBy;
 };
 
@@ -588,8 +582,25 @@ static void SDFindNode(const FArrangedWidget& Arranged, FSlateClippingManager& C
 	const bool bNodeGeometryValid = bGeometryValid && Info.Size.X > 0 && Info.Size.Y > 0;
 	if ((bIncludeHidden || bNodeGeometryValid) && SDMatchLocator(Info, Locator))
 	{
-		const FSlateRect VisibleRect = SDVisibleRect(Info, Clipping);
-		const bool bOnScreen = bNodeGeometryValid && VisibleRect.Right > VisibleRect.Left && VisibleRect.Bottom > VisibleRect.Top;
+		const FSlateClippingZone WidgetZone(Arranged.Geometry);
+		const TOptional<FSlateClippingState> State = Clipping.GetActiveClippingState();
+		const TArray<FVector2D> Polygon = SDVisiblePolygon(WidgetZone, State);
+		FSlateRect VisibleRect(Info.Pos.X, Info.Pos.Y, Info.Pos.X, Info.Pos.Y);
+		FVector2D VisiblePoint = FVector2D::ZeroVector;
+		if (Polygon.Num() > 0)
+		{
+			VisibleRect = FSlateRect(Polygon[0].X, Polygon[0].Y, Polygon[0].X, Polygon[0].Y);
+			for (const FVector2D& Point : Polygon)
+			{
+				VisibleRect.Left = FMath::Min(VisibleRect.Left, static_cast<float>(Point.X));
+				VisibleRect.Top = FMath::Min(VisibleRect.Top, static_cast<float>(Point.Y));
+				VisibleRect.Right = FMath::Max(VisibleRect.Right, static_cast<float>(Point.X));
+				VisibleRect.Bottom = FMath::Max(VisibleRect.Bottom, static_cast<float>(Point.Y));
+				VisiblePoint += Point;
+			}
+			VisiblePoint /= Polygon.Num();
+		}
+		const bool bOnScreen = bNodeGeometryValid && Polygon.Num() > 0;
 		if (bIncludeHidden || bOnScreen)
 		{
 			FSDMatch& Match = OutMatches.AddDefaulted_GetRef();
@@ -599,6 +610,9 @@ static void SDFindNode(const FArrangedWidget& Arranged, FSlateClippingManager& C
 				|| FMath::RoundToInt(VisibleRect.Right - VisibleRect.Left) != FMath::RoundToInt(Info.Size.X)
 				|| FMath::RoundToInt(VisibleRect.Bottom - VisibleRect.Top) != FMath::RoundToInt(Info.Size.Y));
 			Match.VisibleRect = VisibleRect;
+			Match.VisiblePoint = VisiblePoint;
+			Match.bHasVisiblePoint = bOnScreen && (Match.bClipped || !WidgetZone.IsAxisAligned()
+				|| (State.IsSet() && !State->ScissorRect.IsSet()));
 			Match.Info = MoveTemp(Info);
 			Match.Widget = Arranged.Widget;
 			Match.bQueryOnly = bIncludeHidden;
@@ -653,6 +667,10 @@ static FString SDMatchJson(const FSDMatch& Match)
 		Fields.Add(AgentJson::PairBool(TEXT("clipped"), true));
 		Fields.Add(AgentJson::PairRaw(TEXT("visible_rect"), SDRectJson(FVector2D(Match.VisibleRect.Left, Match.VisibleRect.Top),
 			FVector2D(Match.VisibleRect.Right - Match.VisibleRect.Left, Match.VisibleRect.Bottom - Match.VisibleRect.Top))));
+	}
+	if (Match.bHasVisiblePoint)
+	{
+		Fields.Add(AgentJson::PairRaw(TEXT("visible_point"), FString::Printf(TEXT("[%.9f,%.9f]"), Match.VisiblePoint.X, Match.VisiblePoint.Y)));
 	}
 	if (Match.bQueryOnly)
 	{

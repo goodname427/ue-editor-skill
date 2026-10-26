@@ -17,8 +17,10 @@ Skill 的 ui Lib 和项目脚本都 import 这里，不要在别处再拼一遍�
 每步打印 `[input-request] <id> [秒]`，需要回读的组合再打印 `[input-check] <表达式>`；
 ue_cli 执行完脚本后按顺序等这些结果，失败时报 InputAssertionFailed。调用方不要自己 sleep 或轮询。
 """
+import difflib
 import json
 import math
+import os
 import time
 import unreal
 from ue_common import parse, require
@@ -97,12 +99,60 @@ def match(locator, window='', index=0):
 
 
 def center(node):
+    if 'visible_point' in node:
+        return tuple(node['visible_point'])
     x, y, w, h = node.get('visible_rect', node['rect'])
     return x + w / 2.0, y + h / 2.0
 
 
+def image_point(path, x, y):
+    """保存图片的局部像素→截图时的桌面像素；窗口或布局变化后须重新截图。"""
+    path = os.path.abspath(path)
+    if not os.path.isfile(path):
+        raise ValueError('Screenshot not found: ' + path)
+    with open(path + '.json', encoding='utf-8') as file:
+        data = json.load(file)
+    rect, size = data['rect'], data['saved_size']
+    if len(rect) != 4 or len(size) != 2:
+        raise ValueError('Invalid screenshot dimensions')
+    values = [x, y, *rect, *size]
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in values):
+        raise ValueError('Screenshot dimensions and point must be finite numbers')
+    if min(*rect[2:], *size) <= 0 or data.get('origin_size') != rect[2:]:
+        raise ValueError('Invalid screenshot geometry')
+    if not 0 <= x < size[0] or not 0 <= y < size[1]:
+        raise ValueError('Point is outside the saved screenshot')
+    if os.path.normcase(os.path.abspath(data['path'])) != os.path.normcase(path):
+        raise ValueError('Screenshot metadata belongs to another image')
+    return rect[0] + x * rect[2] / size[0], rect[1] + y * rect[3] / size[1]
+
+
 def widget_at(x, y):
     return json.loads(LIB.widget_at(x, y))
+
+
+def suggest(locator, window='', root='', limit=5):
+    """有界只读候选，不自动放宽查询或发送输入；候选顺序不是匹配下标。"""
+    if not 1 <= limit <= 10:
+        raise ValueError('Suggestion limit must be in 1..10')
+    terms = []
+    for condition in locator.split(';'):
+        key, sep, value = condition.partition('=')
+        terms.append((key.rstrip('~').lower() if sep else '', (value if sep else key).casefold()))
+    data = parse(LIB.dump_slate_tree(window, root, 6, False, False, 1000))
+    candidates = []
+    for win in data['windows']:
+        for node in win['nodes']:
+            scores = []
+            for key, value in terms:
+                fields = (key,) if key else ('name', 'tag', 'text', 'hint', 'label', 'type', 'class')
+                values = [str(node.get('text_full', node.get('text', '')) if field == 'text' else node.get(field, '')).casefold() for field in fields]
+                scores.append(max((max(0.8 if value and value in candidate else 0, difflib.SequenceMatcher(None, value, candidate).ratio()) for candidate in values if candidate), default=0))
+            score = sum(scores) / len(scores) if scores else 0
+            if score >= 0.3:
+                candidates.append((score, dict(node, window=win['title'])))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return {'candidates': [node for _, node in candidates[:limit]], 'truncated': data.get('truncated', False)}
 
 
 def read_text(locator, window='', index=0):
@@ -112,13 +162,13 @@ def read_text(locator, window='', index=0):
         return None
     node = matches[index]
     if node['type'] in EDITABLE_TYPES:
-        return node.get('text', '')
+        return node.get('text_full', node.get('text', ''))
     tree = parse(LIB.dump_slate_tree(window, locator, 5, False, False, 200, index))
     for win in tree['windows']:
         for n in win['nodes']:
             if n['type'] in EDITABLE_TYPES:
-                return n.get('text', '')
-    return node.get('text', '')
+                return n.get('text_full', n.get('text', ''))
+    return node.get('text_full', node.get('text', ''))
 
 
 # ---------- 原子步骤 ----------

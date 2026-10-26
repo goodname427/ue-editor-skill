@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -245,6 +246,61 @@ class AnalogTests(unittest.TestCase):
                 self.assertEqual(len(line.splitlines()), 1)
                 self.assertNotIn(separator, line)
                 self.assertIn('\\u%04x' % ord(separator), line)
+
+    def test_image_point_scales_each_axis_and_rejects_invalid_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'capture.png'
+            path.touch()
+            metadata = Path(str(path) + '.json')
+            data = {'path': str(path), 'rect': [-100, 200, 1000, 701],
+                    'origin_size': [1000, 701], 'saved_size': [400, 280]}
+            metadata.write_text(json.dumps(data), encoding='utf-8')
+            self.assertEqual(self.input.image_point(str(path), 200, 140), (400, 550.5))
+            for x, y in ((-1, 0), (400, 0), (0, 280), (float('nan'), 0), (0, float('inf'))):
+                with self.subTest(point=(x, y)), self.assertRaises(ValueError):
+                    self.input.image_point(str(path), x, y)
+            for updates in ({'saved_size': [0, 280]}, {'origin_size': [999, 701]},
+                            {'rect': [0, 0, -1, 701]}, {'path': str(path) + '.other'}):
+                metadata.write_text(json.dumps(dict(data, **updates)), encoding='utf-8')
+                with self.subTest(updates=updates), self.assertRaises(ValueError):
+                    self.input.image_point(str(path), 10, 10)
+            metadata.unlink()
+            with self.assertRaises(OSError):
+                self.input.image_point(str(path), 10, 10)
+
+    def test_ui_image_point_preserves_hit_check_and_rejects_conflicts(self):
+        script = (ROOT / 'skills/ue-editor/scripts/actions/ui.py').read_text(encoding='utf-8')
+        with mock.patch.dict(sys.modules, ue_input=self.input), \
+                mock.patch.object(self.input, 'image_point', return_value=(-20, 30)), \
+                mock.patch.object(self.input, 'click', return_value={'target': None, 'pos': (-20, 30), 'hit': None}) as click:
+            options = {'from_image': 'capture.png', 'point': '10,20', 'expect_hit': 'name=Button'}
+            exec(compile(script, 'ui.py', 'exec'), {'ARGS': ['click'], 'OPTS': options})
+            self.assertEqual(click.call_args.args[1], (-20, 30))
+            self.assertEqual(click.call_args.args[-1], 'name=Button')
+            click.reset_mock()
+            with self.assertRaises(RuntimeError):
+                exec(compile(script, 'ui.py', 'exec'), {'ARGS': ['click'], 'OPTS': dict(options, at='1,2')})
+            click.assert_not_called()
+
+    def test_suggestions_are_bounded_readonly_candidates(self):
+        nodes = [{'type': 'SRichTextBlock', 'text': '<Style>Confirm</>', 'rect': [0, 0, 10, 10]},
+                 {'type': 'STextBlock', 'text': 'Cancel', 'rect': [0, 20, 10, 10]}]
+        self.lib.dump_slate_tree.return_value = json.dumps({'windows': [{'title': 'Editor', 'nodes': nodes}], 'truncated': True})
+        result = self.input.suggest('text=Confirm', root='name=Panel', limit=1)
+        self.assertEqual(len(result['candidates']), 1)
+        self.assertEqual(result['candidates'][0]['text'], '<Style>Confirm</>')
+        self.assertTrue(result['truncated'])
+        self.lib.dump_slate_tree.assert_called_once_with('', 'name=Panel', 6, False, False, 1000)
+        self.lib.mouse_down.assert_not_called()
+
+    def test_read_text_preserves_full_value(self):
+        full = 'x' * 120
+        self.lib.find_widgets.return_value = json.dumps([{'type': 'SMultiLineEditableText', 'text': 'x' * 80 + '...', 'text_full': full}])
+        self.assertEqual(self.input.read_text('text~=' + full), full)
+
+    def test_center_uses_polygon_interior_point(self):
+        self.assertEqual(self.input.center({'rect': [0, 0, 40, 40], 'visible_rect': [10, 10, 30, 30],
+                                           'visible_point': [30.125, 30.5]}), (30.125, 30.5))
 
     def test_drag_checks_drop_target_and_keeps_release_request(self):
         self.lib.mouse_down.return_value = json.dumps({'success': True, 'request_id': 10})

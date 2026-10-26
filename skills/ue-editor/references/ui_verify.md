@@ -81,7 +81,8 @@ python scripts/ue_cli.py screenshot --pie --instance=1 --name=feature-view --arc
 - `--pie` 按 WorldContext 关联真实游戏视口，结果附 world/instance，不误取编辑器 SViewport；只覆盖本编辑器进程，未排布/最小化时不可截，多个匹配不猜首项。`--instance` 使用列表中的真实编号，不是列表下标。
 - `--name` + `--archive` 直接保存到证据目录，文件名自动追加时间戳与细分时间，重复截图不覆盖；不复制第二份。`--out` 保留精确路径，不能同时配 `--name` 或 `--archive`。`--pie` / `--widget` / `--rect` / `--popup` 为互斥截图目标；`--pie` 只截整视口，局部 PIE 用 `--widget` / `--rect` 的桌面坐标，不拿缩放后的整屏图当裁剪坐标。`--crop` 只用于窗口内原始坐标，不与 `--pie` / `--widget` / `--rect` 混用。
 - **局部留边**：`screenshot --widget="name=Panel" --margin=8 --max-width=0`，或 `--rect=x,y,w,h --margin=8`。`--margin` 为非负桌面像素，四边扩展后裁回原窗口，不改变选窗中心；只对 `--widget` / `--rect` 生效。结果 `rect` 是实际捕获的桌面区域，`origin_size` / `saved_size` 分别是缩放前后大小。浮窗阴影、标题靠边时建议留 8 像素，再按实际截图确认。
-- 坐标均为原始桌面像素；负坐标可原样传 `ui click --at=-x,y` 和 `--rect=...`。先按原始坐标裁剪，再按 `--max-width` 缩放保存；保存缩放不改变 find 的 rect。只有从已保存图片重新取坐标时才需做缩放与偏移换算，返回的 origin_size/saved_size 可用于核对。
+- 坐标均为原始桌面像素；负坐标可原样传 `ui click --at=-x,y` 和 `--rect=...`。先裁剪再缩放；每张截图旁保存 `<图片>.json`，含实际抓取时的 `rect`、`origin_size`、`saved_size`。图片局部坐标用 `ui at --from-image=<PNG> --point=x,y` 或 `ui click --from-image=<PNG> --point=x,y --expect-hit=<Locator>`；横纵轴分别换算，支持负桌面原点和缩放舍入。`--at` 仍为桌面坐标，不与图片模式混用；drag 的 `--to` 仍是桌面坐标。缺失/损坏元数据或越界点不发送输入。
+- 图片坐标必须是保存图片本身的像素，不是查看器再次缩放的显示坐标。换算对应截图时的位置，不承诺窗口移动或布局变化后仍有效；这类情况重新截图，并保留 `--expect-hit` / 业务终态确认。元数据文件随图片移动时需保持其中 path 一致，不能复用其他图片的 metadata。
 - 编辑器弹出模态对话框（如"保存修改？"、P4 签出确认）时 Remote Execution 不响应，此时只能靠截图看清卡在哪里。
 - 截图是窗口当前画面：窗口最小化时失败；设计器画面受缩放和分辨率预设影响。用 `read_file` 查看 PNG。
 - `read_file` 提示当前模型不支持图片时，截图对你无效：不要根据截图下结论或推测画面，改用控件树和日志确认；需要看视觉效果的，在回复里列出截图路径交给用户看。

@@ -106,4 +106,6 @@ def capture(hwnd, out_path, crop=None, max_width=1600):
     if max_width and max_width > 0 and img.width > max_width:
         img = img.resize((max_width, round(img.height * max_width / img.width)), Image.LANCZOS)
     img.save(out_path)
-    return {'path': out_path, 'origin_size': origin_size, 'saved_size': list(img.size)}
+    x, y = crop[:2] if crop else (0, 0)
+    return {'path': out_path, 'rect': [l + x, t + y, *origin_size],
+            'origin_size': origin_size, 'saved_size': list(img.size)}

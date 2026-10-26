@@ -623,10 +623,18 @@ def cmd_screenshot(args):
         _print_json({'status': 'error', 'error_type': 'CaptureFailed', 'message': str(e)})
         return
     res['window'] = win['title']
+    res['path'] = os.path.abspath(res['path'])
     if rect:
-        res.update(rect=[win['rect'][0] + crop[0], win['rect'][1] + crop[1], crop[2], crop[3]], margin=args.margin)
+        res['margin'] = args.margin
     if pie:
         res.update(world=pie['world'], instance=pie['instance'])
+    res['metadata_path'] = res['path'] + '.json'
+    try:
+        with open(res['metadata_path'], 'w', encoding='utf-8') as file:
+            json.dump(res, file, ensure_ascii=False)
+    except OSError as e:
+        _print_json({'status': 'error', 'error_type': 'CaptureFailed', 'message': str(e), 'path': res['path']})
+        sys.exit(1)
     _print_json(dict(status='ok', **res))
 
 

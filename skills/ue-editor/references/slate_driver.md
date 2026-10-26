@@ -22,7 +22,7 @@
   - `name` / `class` 只有 UMG 控件才有（取蓝图里的控件名与 UWidget 类名，PIE 界面、WBP 设计器预览都适用）；编辑器原生面板一般靠 `text` / `hint` / `tag` / `type` 定位
 - **window_filter**：只匹配**独立窗口**的标题（主窗口、浮动窗口）。停靠的面板（内容浏览器、细节面板等）都在主窗口里，要用根 Locator 定位，如 `type=SContentBrowser`；同类面板开了多个时用 match index 区分。下拉菜单等弹出层是无标题的独立窗口。
 - **匹配下标**：`match_index` / `--index` 仅对应当次匹配集合，不是控件稳定 ID；页面、导航或列表变化后必须重新查找，不能复用旧下标。
-- **节点字段**：`type`（Slate 类型）、`name`、`class`、`tag`、`text`、`hint`（输入框提示文字）、`rect`；状态字段只在非默认时出现：`vis`（非 Visible）、`enabled: false`、`interactable`、`focus`、`hover`
+- **节点字段**：`type`（Slate 类型）、`name`、`class`、`tag`、`text`、`hint`（输入框提示文字）、`rect`；文本超过摘要长度时另带 `text_full`，`read_text` 优先读完整值。标准富文本的 text 是源字符串（含标签），精确匹配源文或用字面包含；图片、自绘文字或装饰器最终显示文案不自动转换为文本。已知独立多行编辑控件的 text/hint 可读取。状态字段只在非默认时出现：`vis`、`enabled: false`、`interactable`、`focus`、`hover`
 - **输入执行时机**：键鼠/聚焦步骤排到下一帧，CLI 会回读执行结果，目标响应再用 `--wait-until` 确认。`analog_input` 是同步单事件，不排时间线；配对与持续采样由 `ue_input` 在 Python Slate 回调里组合。
 - 驱动不主动定位系统光标，但事件回包可能请求移动、捕获或锁定光标，不能保证不影响用户鼠标。
 - **焦点**：编辑器窗口不在前台时，点击可能拿不到键盘焦点（实测出现过：点击返回成功，文字却打进了关卡视口）。输入文本或按键前，用 `focus_widget` 直接把焦点设到目标上，不要依赖点击。
@@ -63,7 +63,7 @@ print(lib.dump_slate_tree('', 'type=SContentBrowser', 6, False, True, 3000, 0))
 
 ### FindWidgets
 
-查找当前可见分支中命中 Locator 的控件（尺寸为 0 的不算）；父级 Hidden/Collapsed 或完全被裁剪的子控件不会命中。部分裁剪返回原始 `rect`，另带 `clipped=true` 和 `visible_rect`；`ue_input.center` 优先取可见区域中心。裁剪沿引擎规则计算，保留 `WithoutIntersecting` 和 `AlwaysClip`；旋转/Stencil 裁剪的 `visible_rect` 只是交集包围盒，透明目标输入还会精确检查落点，不代表一定可点击。空数组不证明蓝图没有该控件，诊断用 `find_widgets(..., include_hidden=True)` 或隐藏控件树，必要时再查蓝图静态结构。
+查找当前可见分支中命中 Locator 的控件（尺寸为 0 的不算）；父级 Hidden/Collapsed 或真实裁剪交集为空的子控件不会命中。`rect` 为渲染包围盒；部分裁剪另带 `clipped=true` / `visible_rect`。旋转/Stencil 按凸多边形计算真实交集，`visible_rect` 只用于包围盒展示，`visible_point` 为交集内部落点；`ue_input.center` 优先使用它，避免包围盒中心落在裁剪外。裁剪沿引擎栈规则计算，保留 `WithoutIntersecting` / `AlwaysClip`；可见仍不保证未被其他窗口或兄弟控件遮挡，输入校验保留。空数组不证明蓝图没有该控件，诊断用 `find_widgets(..., include_hidden=True)` 或隐藏控件树，必要时再查蓝图静态结构。
 
 ```python
 print(lib.find_widgets('hint~=Search', ''))
@@ -71,6 +71,7 @@ print(lib.find_widgets('hint~=Search', ''))
 
 - **参数**: `locator` (`str`), `window_filter` (`str`), `include_hidden` (`bool`，默认 false)
 - **返回**: `str` — JSON 数组，每项附 `window`；默认可见查询下标可给其它输入接口。
+- **未命中诊断**：`ui find` 先查隐藏/裁剪精确目标，再从有界可见树中给最多五个近似候选；可用 `--root=<Locator>` / `--window` 缩小候选扫描，`--no-suggest` 关闭。候选不是命中，顺序不是匹配下标，不会自动点击。脚本复用 `ue_input.suggest(locator, window='', root='', limit=5)`。
 - **隐藏/裁剪诊断**：`lib.find_widgets('name=Btn_Apply', '', True)` 另查已创建隐藏、未参与布局或完全被裁剪的节点，返回 `query_only=true`、`geometry_valid`、`visible_path` 和可用的 `hidden_by`、`clipped` / `visible_rect`。`visible_path=true` 只表示祖先未 Hidden/Collapsed，不表示未裁剪。诊断模式下标/几何不可直接用于点击/截图，须重查可见目标；不保证容器未公开或未创建的节点。滚到可见位置仍须跨帧执行滚动再重新定位，不会由查询或聚焦自动完成。
 
 ### GetKeyboardFocus

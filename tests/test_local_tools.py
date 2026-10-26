@@ -107,7 +107,12 @@ class ScreenshotTests(unittest.TestCase):
         self.window = {'hwnd': 1, 'title': 'Editor', 'rect': [-100, 20, 100, 80]}
         self.screenshot = mock.Mock()
         self.screenshot.window_at.return_value = self.window
-        self.screenshot.capture.return_value = {'path': self.args.out}
+        self.screenshot.capture.side_effect = lambda hwnd, path, crop, max_width: {
+            'path': path, 'rect': [self.window['rect'][0] + (crop[0] if crop else 0),
+                                   self.window['rect'][1] + (crop[1] if crop else 0),
+                                   *(crop[2:] if crop else self.window['rect'][2:])],
+            'origin_size': crop[2:] if crop else self.window['rect'][2:], 'saved_size': [40, 30]}
+        self.screenshot.find_window.return_value = self.window
 
     def run_capture(self):
         output = io.StringIO()
@@ -135,6 +140,25 @@ class ScreenshotTests(unittest.TestCase):
         with mock.patch.object(ue_cli, '_widget_rect', return_value=[-90, 30, 50, 40]):
             result = self.run_capture()
         self.assertEqual(result['rect'], [-98, 22, 66, 56])
+
+    def test_metadata_saved_for_window_and_crop(self):
+        self.args.margin = 0
+        self.args.rect = None
+        for crop in (None, '10,15,50,40'):
+            with self.subTest(crop=crop):
+                self.args.crop = crop
+                result = self.run_capture()
+                with open(result['metadata_path'], encoding='utf-8') as file:
+                    data = json.load(file)
+                self.assertEqual(data['rect'], [-90, 35, 50, 40] if crop else self.window['rect'])
+                self.assertEqual(data['saved_size'], [40, 30])
+                self.assertEqual(data['path'], self.args.out)
+
+    def test_actual_capture_geometry_is_not_overwritten(self):
+        self.screenshot.capture.side_effect = None
+        self.screenshot.capture.return_value = {'path': self.args.out, 'rect': [-500, 400, 66, 56],
+                                               'origin_size': [66, 56], 'saved_size': [40, 30]}
+        self.assertEqual(self.run_capture()['rect'], [-500, 400, 66, 56])
 
     def test_invalid_margin_and_ignored_crop_rejected(self):
         for updates in ({'margin': -1}, {'rect': None}, {'crop': '0,0,5,5'},

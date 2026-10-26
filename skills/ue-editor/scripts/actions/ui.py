@@ -4,8 +4,9 @@
 
   exec --action ui windows                                         列出可见窗口
   exec --action ui tree [根Locator] [--index=N] [--depth=N] [--window=标题] [--full] [--hidden] [--max=N]
-  exec --action ui find <Locator> [--window=标题] [--hidden]         隐藏查询结果仅作诊断，不复用下标/几何
+  exec --action ui find <Locator> [--window=标题] [--hidden] [--root=<Locator>] [--no-suggest]  无命中时诊断隐藏/裁剪或给只读候选
   exec --action ui at <x,y>                                        坐标处最上层控件
+  exec --action ui at --from-image=<PNG> --point=x,y                保存图片局部像素→桌面命中；同样支持 click/mousedown/move/scroll/drag 起点
   exec --action ui focus                                           当前键盘焦点
   exec --action ui click <Locator> [--index=N] [--right] [--double] [--hold=秒] [--expect-hit=<Locator>] [--no-check]    或 --at=x,y
   exec --action ui type <文本> [--focus=<Locator>] [--index=N] [--enter] [--append]
@@ -79,14 +80,21 @@ def point(text):
 
 
 def need_target(what):
-    if not ARGS[1:] and not OPTS.get('at'):
-        raise RuntimeError('%s needs <Locator> or --at=x,y\n\n%s' % (what, __doc__))
+    if not ARGS[1:] and not OPTS.get('at') and not OPTS.get('from_image'):
+        raise RuntimeError('%s needs <Locator>, --at=x,y or --from-image=PNG --point=x,y\n\n%s' % (what, __doc__))
+
+
+def coordinate():
+    if OPTS.get('from_image'):
+        return ue_input.image_point(OPTS['from_image'], *point(OPTS['point']))
+    return point(OPTS['at']) if OPTS.get('at') else None
 
 
 def target_point():
-    """--at 优先，否则取 Locator 命中控件的中心；返回 (x, y, 命中控件或 None)。"""
-    if OPTS.get('at'):
-        return point(OPTS['at']) + (None,)
+    """显式坐标优先，否则取 Locator 中心；图片坐标由同一转换入口处理。"""
+    at = coordinate()
+    if at is not None:
+        return at + (None,)
     node = ue_input.match(ARGS[1], window, index)
     return ue_input.center(node) + (node,)
 
@@ -101,9 +109,14 @@ def print_target(node):
 
 
 cmd = ARGS[0] if ARGS else ''
-for key in ('index', 'depth', 'max', 'delta', 'at', 'window', 'focus', 'expect_hit', 'hold', 'max_hold', 'frames', 'to', 'to_target', 'to_index', 'drop_target', 'ancestor', 'device'):
+for key in ('index', 'depth', 'max', 'delta', 'at', 'from_image', 'point', 'window', 'focus', 'expect_hit', 'hold', 'max_hold', 'frames', 'to', 'to_target', 'to_index', 'drop_target', 'ancestor', 'root', 'device'):
     if OPTS.get(key) is True:
         raise RuntimeError('--%s needs a value; use --%s=<value>, not --%s <value>' % (key, key, key))
+if 'from_image' in OPTS or 'point' in OPTS:
+    if not OPTS.get('from_image') or not OPTS.get('point') or OPTS.get('at') or ARGS[1:]:
+        raise RuntimeError('--from-image=PNG and --point=x,y must be used together, without --at or a positional target')
+    if cmd not in ('at', 'click', 'mousedown', 'move', 'scroll', 'drag'):
+        raise RuntimeError('--from-image is only supported for pointer operations')
 window = OPTS.get('window', '')
 index = int(OPTS.get('index', 0))
 mods = (bool(OPTS.get('ctrl')), bool(OPTS.get('shift')), bool(OPTS.get('alt')))
@@ -139,11 +152,25 @@ elif cmd == 'find':
     print('\n'.join('[%d] %s  (%s)' % (i, line(n), n['window'] or 'untitled popup') for i, n in enumerate(matches)) or '(no match)')
     if OPTS.get('hidden'):
         print('[query only] hidden-result indices/geometry cannot be reused for click or screenshot')
+    if not matches and not OPTS.get('no_suggest'):
+        hidden = ue_input.find(ARGS[1], window, include_hidden=True) if not OPTS.get('hidden') else []
+        if hidden:
+            print('[query only] target exists but is hidden, unarranged or clipped; do not reuse diagnostic indices')
+            for node in hidden[:5]:
+                print('  ' + line(node))
+        else:
+            suggestions = ue_input.suggest(ARGS[1], window, OPTS.get('root', ''))
+            print('[suggestions only] not matches; query again before input. ~= is literal contains; rich text uses source markup. Image pixels are not searchable text.')
+            for node in suggestions['candidates']:
+                print('  ' + line(node))
+            if suggestions['truncated']:
+                print('... candidate scan truncated; narrow with --root / --window')
 
 elif cmd == 'at':
-    if len(ARGS) < 2:
+    at = coordinate()
+    if at is None and len(ARGS) < 2:
         raise RuntimeError(__doc__)
-    print(line(ue_input.widget_at(*point(ARGS[1]))))
+    print(line(ue_input.widget_at(*(at if at is not None else point(ARGS[1])))))
 
 elif cmd == 'focus':
     print(line(parse(lib.get_keyboard_focus())))
@@ -155,8 +182,8 @@ elif cmd == 'click':
     if 'expect_hit' in OPTS and not OPTS['expect_hit']:
         raise RuntimeError('--expect-hit requires a non-empty Locator')
     hold = float(OPTS.get('hold', 0))
-    at = point(OPTS['at']) if OPTS.get('at') else None
-    r = ue_input.click(None if at else ARGS[1], at, window, index, button_name(), bool(OPTS.get('double')), hold,
+    at = coordinate()
+    r = ue_input.click(None if at is not None else ARGS[1], at, window, index, button_name(), bool(OPTS.get('double')), hold,
                        not OPTS.get('no_check'), OPTS.get('expect_hit'))
     print_target(r['target'])
     print('queued %s %s at (%d,%d), topmost there: %s' % (button_name().lower(), 'press %gs' % hold if hold else 'click', r['pos'][0], r['pos'][1], line(r['hit'])))
