@@ -49,7 +49,8 @@ if not ue_wbp.save(P):
 - **"是变量"**：新建控件的 `bIsVariable` 默认值随类不同（Widget 基类是 true，多数面板和 TextBlock 显式 false），`add_widget` 总是显式写入（默认勾上，`var=False` 不勾），`replace_widget` 默认沿用旧控件。
 - **子蓝图实例**：类写蓝图路径（`/Game/.../WBP_Child`），或 UMG 类名（`Button`、项目类）。
 - **样式**：`copy_from` 从同树控件复制 `ue_wbp.STYLE_PROPS` 里两边都有的属性（`widget_style` / `font` / `item_style` / `scroll_bar_style` / `content_padding` / `foreground_color` / `max_list_height`）；文字子控件用 `text_font_from` 复制 `font`。
-- **顺序**：没有插入 API，新控件只能追加到父面板末尾；`replace_widget` 换出来的新控件也在末尾，同一父面板有多个子控件时顺序会变。
+- **单子父控件**：`add_widget` 支持空 `ContentWidget`（如 Border/Button），内部用 `set_content`；已有子控件时拒绝覆盖，须显式 `replace_widget`。
+- **顺序**：`add_widget(..., before='Anchor')` / `after='Anchor'` 支持同父锚点插入（互斥）；已有控件用 `insert_before(P, name, anchor)` / `insert_after(P, name, anchor)`，对应 `wbp_edit insert-before/insert-after`。内部走原生 `ShiftChild`，保留插槽实例和属性；`replace_widget` 保留旧索引。锚点不同父时改前失败。引擎顺序变更需要重建 Slate，最终用 `save` 编译保存。
 - **移除**：控件从父面板拿掉后移到 `/Engine/Transient`（换一个没被占用的名字，同名对象已在 Transient 时引擎重命名会 fatal），这样原名可以立刻再用。
 - 需要控件对象本身（调引擎 API）时用 `ue_wbp.widget(P, name)`；任意层级的控件都平铺挂在 WidgetTree 下，路径不带父控件名。
 

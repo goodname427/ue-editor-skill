@@ -6,8 +6,10 @@ Widget 蓝图写操作：新增 / 改名 / 改属性 / 换控件 / 移除，改�
   exec --action wbp_edit rename <WBP路径> <旧名> <新名>                        改控件名，同步变量引用、属性/动画/导航绑定
   exec --action wbp_edit set <WBP路径> <控件名> <属性>=<值> [<属性>=<值> ...] [--slot]   改属性（--slot 改它所在插槽），值用 UE 文本格式：
                                                                            bIsVariable=True、Visibility=Collapsed；写后回读，解析失败直接报错
-  exec --action wbp_edit add <WBP路径> <父控件名|root> <新名> <类> [选项]       在面板下新增控件（追加到末尾，没有插入/替换 API）
-  exec --action wbp_edit replace <WBP路径> <旧控件名> <类> [选项]              同父面板换控件（旧实例移出到 Transient；新控件追加到末尾）
+  exec --action wbp_edit add <WBP路径> <父控件名|root> <新名> <类> [选项]       在面板或空 ContentWidget 下新增控件；--before/--after 指定同父锚点
+  exec --action wbp_edit insert-before <WBP路径> <控件名> <同父锚点>            保留插槽实例，把已有控件移到锚点前
+  exec --action wbp_edit insert-after <WBP路径> <控件名> <同父锚点>             保留插槽实例，把已有控件移到锚点后
+  exec --action wbp_edit replace <WBP路径> <旧控件名> <类> [选项]              同父换控件（旧实例移出到 Transient；新控件保留旧索引）
   exec --action wbp_edit remove <WBP路径> <控件名>                             从父面板移除并移出 WidgetTree
   exec --action wbp_edit save <WBP路径>...                                    只编译 + 保存，脚本改完蓝图后的收尾（--no-save 攒下的改动在这里统一落盘）
 
@@ -20,6 +22,8 @@ Widget 蓝图写操作：新增 / 改名 / 改属性 / 换控件 / 移除，改�
   --no-var                不勾"是变量"：add 默认勾上；replace 默认沿用旧控件的变量状态
   --var                   replace 强制勾"是变量"
   --new-name=<名>         replace 时给新控件换名（默认沿用旧名，保持按名字的引用）
+  --before=<同父控件名>   add 时插在指定控件前，与 --after 互斥
+  --after=<同父控件名>    add 时插在指定控件后
   CanvasPanel 槽位：--anchor=minx,miny,maxx,maxy  --offset=l,t,r,b  --align=x,y      replace 不写时沿用旧控件槽位
   横向/纵向/Overlay 槽位：--padding=l,t,r,b  --size=值[,fill|auto]  --halign=left|center|right|fill  --valign=top|center|bottom|fill
   --no-save               只改内存不编译保存（留给后续 save 统一收尾）
@@ -111,7 +115,15 @@ elif cmd == 'set':
 elif cmd == 'add':
     if len(ARGS) < 5:
         _usage('add needs <WBP路径> <父控件名|root> <新名> <类>')
-    _report(ue_wbp.add_widget(ARGS[1], ARGS[2], ARGS[3], ARGS[4], var=not OPTS.get('no_var'), **_new_opts()), 'added', ARGS[1])
+    _report(ue_wbp.add_widget(ARGS[1], ARGS[2], ARGS[3], ARGS[4], var=not OPTS.get('no_var'),
+                             before=OPTS.get('before'), after=OPTS.get('after'), **_new_opts()), 'added', ARGS[1])
+    _finish(ARGS[1])
+
+elif cmd in ('insert-before', 'insert-after'):
+    if len(ARGS) < 4:
+        _usage(cmd + ' needs <WBP路径> <控件名> <同父锚点>')
+    result = (ue_wbp.insert_before if cmd == 'insert-before' else ue_wbp.insert_after)(ARGS[1], ARGS[2], ARGS[3])
+    print('moved %s to index=%d' % (ARGS[2], result['index']))
     _finish(ARGS[1])
 
 elif cmd == 'replace':

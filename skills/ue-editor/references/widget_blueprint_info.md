@@ -34,7 +34,8 @@
 
 | 函数 | 说明 |
 |---|---|
-| `add_widget(path, parent, name, cls, slot=None, var=True, text=None, text_name=None, text_font_from=None, copy_from=None)` | 在面板 `parent`（`'root'` 为根控件）末尾新增控件。返回 `{name, type, parent, kind, is_variable[, text][, copied]}` |
+| `add_widget(path, parent, name, cls, slot=None, var=True, text=None, text_name=None, text_font_from=None, copy_from=None, before=None, after=None)` | 在面板或空 ContentWidget 下新增，before/after 指定同父锚点，否则追加。返回 `{name, type, parent, kind, is_variable[, text][, copied]}` |
+| `insert_before(path, name, anchor)` / `insert_after(path, name, anchor)` | 调原生 ShiftChild 重排同父控件，保留插槽实例和属性 |
 | `replace_widget(path, old, cls, new_name=None, slot=None, var=None, ...)` | 同父面板换控件：旧实例移到 Transient，新控件沿用旧插槽（`slot` 里给的项覆盖），`var=None` 时沿用旧控件的"是变量" |
 | `remove_widget(path, name)` | 从父面板移除并移到 Transient |
 | `check_slot(slot)` | 校验插槽参数：`anchor` / `offset` / `align`（CanvasPanel）、`padding` / `size=(值, 'fill'\|'auto')` / `halign` / `valign`（横向/纵向/Overlay） |

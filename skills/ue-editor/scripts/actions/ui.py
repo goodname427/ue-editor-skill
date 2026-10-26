@@ -11,15 +11,17 @@
   exec --action ui type <文本> [--focus=<Locator>] [--index=N] [--enter] [--append]
   exec --action ui key <键名> [--ctrl] [--shift] [--alt] [--hold=秒] [--focus=<Locator>] [--index=N]    键名如 Escape / Enter / F5 / A
   exec --action ui scroll <Locator> [--index=N] [--delta=-3] [--frames=8]        或 --at=x,y；delta 正数向上
+  exec --action ui scroll-into-view <Locator> [--index=N] [--ancestor=0]            将已创建的 ScrollBox 后代滚入视野；index 来自 --hidden 查询
   按住 / 抬起 / 移动：
   exec --action ui keydown <键名> [--ctrl] [--shift] [--alt] [--max-hold=30]           按住不放，直到 keyup / release；--max-hold 秒后自动抬起
   exec --action ui keyup <键名>
   exec --action ui analog Gamepad_LeftX=1 [Gamepad_LeftY=0] [--hold=秒] [--device=ID]    逐帧采样后自动归零，hold 默认 0（一次脉冲）
   exec --action ui analogset Gamepad_LeftX=1 [Gamepad_LeftY=0] [--device=ID]             单次设值，必须自行发 0，不自动保持/归零
   exec --action ui mousedown <Locator> [--index=N] [--right|--middle] [--max-hold=30]   或 --at=x,y；控件模式校验落点未被遮挡
-  exec --action ui mouseup [--right|--middle]
+  exec --action ui mouseup [--right|--middle] [--drop-target=<Locator>] [--to-index=N]
   exec --action ui move <Locator> [--index=N] [--frames=1]                      或 --at=x,y；按着鼠标键时就是拖动
   exec --action ui drag <Locator> --to=x,y [--frames=20] [--right|--middle]     或 --at=x,y / --to-target=<Locator>
+                         [--drop-target=<Locator>] [--to-index=N] [--no-check]  释放前核实落点；默认拒绝无目标或 SViewport
   exec --action ui release                                                       取消排队中的输入并抬起全部按键
 
 所有输入都由 Skill lib 的 ue_input（scripts/lib/ue_input.py）拼装，排在同一条时间线上：前一步完成才执行下一步，
@@ -99,7 +101,7 @@ def print_target(node):
 
 
 cmd = ARGS[0] if ARGS else ''
-for key in ('index', 'depth', 'max', 'delta', 'at', 'window', 'focus', 'expect_hit', 'hold', 'max_hold', 'frames', 'to', 'to_target', 'device'):
+for key in ('index', 'depth', 'max', 'delta', 'at', 'window', 'focus', 'expect_hit', 'hold', 'max_hold', 'frames', 'to', 'to_target', 'to_index', 'drop_target', 'ancestor', 'device'):
     if OPTS.get(key) is True:
         raise RuntimeError('--%s needs a value; use --%s=<value>, not --%s <value>' % (key, key, key))
 window = OPTS.get('window', '')
@@ -231,7 +233,7 @@ elif cmd == 'mousedown':
           % (button_name().lower(), x, y, max_hold, line(r['hit'])))
 
 elif cmd == 'mouseup':
-    ue_input.mouse_up(button_name())
+    ue_input.mouse_up(button_name(), OPTS.get('drop_target', ''), window, int(OPTS.get('to_index', 0)))
     print('queued %s release at current pointer' % button_name().lower())
 
 elif cmd == 'move':
@@ -246,16 +248,25 @@ elif cmd == 'drag':
     if not OPTS.get('to') and not OPTS.get('to_target'):
         raise RuntimeError('drag needs --to=x,y or --to-target=<Locator>')
     x, y, node = target_point()
-    to = point(OPTS['to']) if OPTS.get('to') else ue_input.center(ue_input.match(OPTS['to_target'], window))
+    to_index = int(OPTS.get('to_index', 0))
+    to = point(OPTS['to']) if OPTS.get('to') else ue_input.center(ue_input.match(OPTS['to_target'], window, to_index))
     frames = int(OPTS.get('frames', 20))
     print_target(node)
-    r = ue_input.drag((x, y), to, frames, button_name(), ARGS[1] if node else '', window, index)
+    r = ue_input.drag((x, y), to, frames, button_name(), ARGS[1] if node and not OPTS.get('no_check') else '', window, index,
+                      OPTS.get('drop_target') or OPTS.get('to_target', ''), to_index, not OPTS.get('no_check'))
     print('queued %s drag (%d,%d) -> (%d,%d) over %d frames, topmost at start: %s'
           % (button_name().lower(), x, y, to[0], to[1], frames, line(r['hit'])))
 
 elif cmd == 'release':
     ue_input.release_all()
     print('queued: cancel pending input and release every held key and button')
+
+elif cmd == 'scroll-into-view':
+    if len(ARGS) < 2:
+        raise RuntimeError('scroll-into-view needs <Locator>')
+    result = ue_input.scroll_into_view(ARGS[1], window, index, int(OPTS.get('ancestor', 0)))
+    print_target(result['target'])
+    print('queued scroll into view; index uses the diagnostic match set')
 
 elif cmd == 'scroll':
     need_target('scroll')

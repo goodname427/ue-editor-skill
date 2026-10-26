@@ -20,6 +20,11 @@
 #include "MovieScenePossessable.h"
 #include "WidgetBlueprint.h"
 
+#if WITH_DEV_AUTOMATION_TESTS
+#include "Components/CanvasPanel.h"
+#include "Misc/AutomationTest.h"
+#endif
+
 // ==================== 公共辅助 ====================
 
 static FString WBPFail(const FString& Message)
@@ -49,6 +54,27 @@ static UWidgetBlueprint* WBPLoad(const FString& AssetPath, FString& OutError)
 	}
 	return WidgetBP;
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FWBPPrepareFixtureTest, "AgentTools.WBP.PrepareFixture", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FWBPPrepareFixtureTest::RunTest(const FString& Parameters)
+{
+	FString Error;
+	UWidgetBlueprint* Blueprint = WBPLoad(TEXT("/Game/__AgentToolsTests/IssuesFixture"), Error);
+	if (!TestNotNull(TEXT("Explicitly created test fixture exists"), Blueprint))
+	{
+		return false;
+	}
+	if (Blueprint->WidgetTree->RootWidget)
+	{
+		return TestTrue(TEXT("Fixture root is a canvas"), Blueprint->WidgetTree->RootWidget->IsA<UCanvasPanel>());
+	}
+	Blueprint->WidgetTree->RootWidget = Blueprint->WidgetTree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass(), TEXT("FixtureCanvas"));
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+	return TestNotNull(TEXT("Fixture root was created"), Blueprint->WidgetTree->RootWidget.Get());
+}
+#endif
 
 static UWidget* WBPFindWidget(UWidgetBlueprint* WidgetBP, const FString& WidgetName, FString& OutError)
 {
@@ -484,6 +510,31 @@ FString UAgentWidgetBlueprintInfoFunctionLib::GetBlueprintFunctions(const FStrin
 }
 
 // ==================== 写入 ====================
+
+FString UAgentWidgetBlueprintInfoFunctionLib::ShiftChild(const FString& AssetPath, const FString& WidgetName, int32 Index)
+{
+	FString Error;
+	UWidgetBlueprint* WidgetBP = WBPLoad(AssetPath, Error);
+	UWidget* Widget = WidgetBP ? WBPFindWidget(WidgetBP, WidgetName, Error) : nullptr;
+	if (!Widget)
+	{
+		return WBPFail(Error);
+	}
+	UPanelWidget* Parent = Widget->GetParent();
+	if (!Parent || Index < 0 || Index >= Parent->GetChildrenCount())
+	{
+		return WBPFail(TEXT("Child needs a panel parent and an index within its existing children"));
+	}
+	WidgetBP->Modify();
+	Parent->Modify();
+	Parent->ShiftChild(Index, Widget);
+	if (Parent->GetChildIndex(Widget) != Index)
+	{
+		return WBPFail(TEXT("ShiftChild did not produce the requested index"));
+	}
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
+	return WBPOk(FString(), {AgentJson::PairInt(TEXT("index"), Index)});
+}
 
 FString UAgentWidgetBlueprintInfoFunctionLib::RenameChildWidget(const FString& AssetPath, const FString& OldWidgetName, const FString& NewWidgetName)
 {

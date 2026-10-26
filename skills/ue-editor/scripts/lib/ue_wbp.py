@@ -92,7 +92,8 @@ def rename_widget(path, old, new):
 _ATTACH = (('canvas', 'CanvasPanel', 'add_child_to_canvas'),
            ('hbox', 'HorizontalBox', 'add_child_to_horizontal_box'),
            ('vbox', 'VerticalBox', 'add_child_to_vertical_box'),
-           ('overlay', 'Overlay', 'add_child_to_overlay'))
+           ('overlay', 'Overlay', 'add_child_to_overlay'),
+           ('content', 'ContentWidget', 'set_content'))
 _HALIGN = {'left': 'H_ALIGN_LEFT', 'center': 'H_ALIGN_CENTER', 'right': 'H_ALIGN_RIGHT', 'fill': 'H_ALIGN_FILL'}
 _VALIGN = {'top': 'V_ALIGN_TOP', 'center': 'V_ALIGN_CENTER', 'bottom': 'V_ALIGN_BOTTOM', 'fill': 'V_ALIGN_FILL'}
 STYLE_PROPS = ('widget_style', 'font', 'item_style', 'scroll_bar_style', 'content_padding', 'foreground_color', 'max_list_height')
@@ -135,7 +136,7 @@ def widget_class(text):
 
 
 def panel_kind(obj):
-    """面板类型 canvas / hbox / vbox / overlay，以及挂子控件的方法名；不是这几种面板时为 (None, None)。"""
+    """父控件类型 canvas / hbox / vbox / overlay / content 及挂子控件方法；不支持时为 (None, None)。"""
     for kind, cls_name, add in _ATTACH:
         cls = getattr(unreal, cls_name, None)
         if cls is not None and isinstance(obj, cls):
@@ -264,23 +265,56 @@ def _finish_new(path, obj, text=None, text_name=None, text_font_from=None, copy_
     return result
 
 
-def add_widget(path, parent, name, cls_text, slot=None, var=True, text=None, text_name=None, text_font_from=None, copy_from=None):
-    """在面板 parent（'root' 为根控件）末尾新增控件；没有插入 API。slot 见 check_slot。
-    返回 {name, type, parent, kind, is_variable[, text][, copied]}。"""
+def add_widget(path, parent, name, cls_text, slot=None, var=True, text=None, text_name=None, text_font_from=None, copy_from=None, before=None, after=None):
+    """在面板或空 ContentWidget 下新增控件；before/after 指定同父锚点，否则追加。slot 见 check_slot。"""
     values = check_slot(slot or {})
     parent_name = root(path) if parent == 'root' else parent
     parent_obj = widget(path, parent_name)
     kind, add = panel_kind(parent_obj)
     if kind is None:
-        raise RuntimeError('parent is not a panel widget: %s (%s)' % (parent_name, parent_obj.get_class().get_name()))
+        raise RuntimeError('parent is not a supported panel widget: %s (%s)' % (parent_name, parent_obj.get_class().get_name()))
+    if before and after:
+        raise ValueError('before and after are mutually exclusive')
+    if kind == 'content' and parent_obj.get_content() is not None:
+        raise RuntimeError('content parent already has a child; use replace_widget: ' + parent_name)
+    anchor = widget(path, before or after) if before or after else None
+    if anchor is not None and anchor.get_parent() != parent_obj:
+        raise RuntimeError('insertion anchor must have the same parent')
+    insert_index = parent_obj.get_child_index(anchor) + (1 if after else 0) if anchor else None
     obj = _create(path, cls_text, name)
-    apply_slot(getattr(parent_obj, add)(obj), kind, values)
-    return dict(_finish_new(path, obj, text, text_name, text_font_from, copy_from, var), parent=parent_name, kind=kind)
+    new_slot = getattr(parent_obj, add)(obj)
+    if new_slot is None:
+        raise RuntimeError('parent refused the new child: ' + parent_name)
+    apply_slot(new_slot, kind, values)
+    result = dict(_finish_new(path, obj, text, text_name, text_font_from, copy_from, var), parent=parent_name, kind=kind)
+    if insert_index is not None:
+        parse(LIB.shift_child(path, name, insert_index))
+    return result
+
+
+def insert_before(path, name, anchor):
+    """将已有控件移到同父锚点前，保留插槽实例与属性。"""
+    obj, target = widget(path, name), widget(path, anchor)
+    parent = obj.get_parent()
+    if parent is None or target.get_parent() != parent or obj == target:
+        raise RuntimeError('child and anchor must be distinct siblings')
+    index = parent.get_child_index(target) - (1 if parent.get_child_index(obj) < parent.get_child_index(target) else 0)
+    return parse(LIB.shift_child(path, name, index))
+
+
+def insert_after(path, name, anchor):
+    """将已有控件移到同父锚点后，保留插槽实例与属性。"""
+    obj, target = widget(path, name), widget(path, anchor)
+    parent = obj.get_parent()
+    if parent is None or target.get_parent() != parent or obj == target:
+        raise RuntimeError('child and anchor must be distinct siblings')
+    index = parent.get_child_index(target) + (0 if parent.get_child_index(obj) < parent.get_child_index(target) else 1)
+    return parse(LIB.shift_child(path, name, index))
 
 
 def replace_widget(path, old, cls_text, new_name=None, slot=None, var=None, text=None, text_name=None, text_font_from=None, copy_from=None):
     """同一父面板里换控件：旧实例移到 Transient，新控件沿用旧插槽（slot 中给出的项覆盖）；var=None 时沿用旧控件的"是变量"。
-    新控件追加在父面板末尾（没有插入 API），同父面板有多个子控件时顺序会变。"""
+    新控件保留旧控件的同父索引；支持 ContentWidget 父控件。"""
     values = check_slot(slot or {})
     old_obj = widget(path, old)
     parent_obj = old_obj.get_parent()
@@ -292,13 +326,16 @@ def replace_widget(path, old, cls_text, new_name=None, slot=None, var=None, text
         raise RuntimeError('widget name already exists: ' + name)
     keep_var = is_variable(path, old) if var is None else var
     saved = capture_slot(old_obj)
+    old_index = parent_obj.get_child_index(old_obj)
     parent_obj.remove_child(old_obj)
     _to_transient(old_obj, old + '_Removed')
     obj = _create(path, cls_text, name)
     new_slot = getattr(parent_obj, add)(obj)
     restore_slot(new_slot, saved)
     apply_slot(new_slot, kind, values)
-    return dict(_finish_new(path, obj, text, text_name, text_font_from, copy_from, keep_var), parent=parent_obj.get_name(), kind=kind)
+    result = dict(_finish_new(path, obj, text, text_name, text_font_from, copy_from, keep_var), parent=parent_obj.get_name(), kind=kind)
+    parse(LIB.shift_child(path, name, old_index))
+    return result
 
 
 def remove_widget(path, name):

@@ -235,6 +235,43 @@ class AnalogTests(unittest.TestCase):
         self.assertEqual(len(self.input.describe(node).splitlines()), 1)
         self.assertEqual(self.input.describe(None), '(none)')
 
+    def test_describe_escapes_unicode_line_separators(self):
+        for separator in ('\u0085', '\u2028', '\u2029'):
+            with self.subTest(separator=repr(separator)):
+                text = 'a' + separator + 'b'
+                node = {'type': 'STextBlock', 'rect': [1, 2, 3, 4],
+                        'text': text, 'hint': text, 'label': text, 'tag': text, 'owner': text}
+                line = self.input.describe(node)
+                self.assertEqual(len(line.splitlines()), 1)
+                self.assertNotIn(separator, line)
+                self.assertIn('\\u%04x' % ord(separator), line)
+
+    def test_drag_checks_drop_target_and_keeps_release_request(self):
+        self.lib.mouse_down.return_value = json.dumps({'success': True, 'request_id': 10})
+        self.lib.mouse_move.return_value = json.dumps({'success': True, 'request_id': 11})
+        self.lib.mouse_up.return_value = json.dumps({'success': True, 'request_id': 12})
+        result = self.input.drag((1, 2), (3, 4), drop_target='name=Drop', drop_index=2)
+        self.lib.mouse_up.assert_called_once_with('Left', 'name=Drop', '', 2, True)
+        self.assertEqual(result['release_request_id'], 12)
+        self.lib.mouse_up.reset_mock()
+        self.input.drag((1, 2), (3, 4), check_drop=False)
+        self.lib.mouse_up.assert_called_once_with('Left', '', '', 0, False)
+
+    def test_scroll_waits_before_visible_readback(self):
+        self.lib.scroll_descendant_into_view.return_value = json.dumps({'success': True, 'request_id': 10})
+        result = self.input.scroll_into_view('name=Offscreen', index=2, ancestor=1)
+        self.lib.scroll_descendant_into_view.assert_called_once_with('name=Offscreen', '', 2, 1, False, 2)
+        self.lib.wait_input.assert_called_once_with(0, 3)
+        self.assertEqual(result['ready_request_id'], 1)
+        node = {'rect': [0, 10, 10, 10], 'geometry_valid': True, 'visible_rect': [0, 10, 10, 0]}
+        self.lib.find_widgets.return_value = json.dumps([node])
+        self.assertFalse(json.loads(self.input.check_visible('name=Offscreen'))['ok'])
+        node['visible_rect'][3] = 10
+        self.lib.find_widgets.return_value = json.dumps([node])
+        self.assertTrue(json.loads(self.input.check_visible('name=Offscreen'))['ok'])
+        self.lib.find_widgets.return_value = '[]'
+        self.assertFalse(json.loads(self.input.check_visible('name=Missing'))['ok'])
+
     def test_center_prefers_visible_rect(self):
         node = {'type': 'STextBlock', 'rect': [100, 200, 80, 100],
                 'visible_rect': [100, 200, 80, 20], 'clipped': True}

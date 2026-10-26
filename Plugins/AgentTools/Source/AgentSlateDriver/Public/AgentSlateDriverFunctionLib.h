@@ -129,7 +129,7 @@ public:
 
 	/** 在当前指针位置抬起经 MouseDown 按住的鼠标键；没按住时判失败。结果含 pos, hit */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
-	static FString MouseUp(const FString& Button = TEXT("Left"));
+	static FString MouseUp(const FString& Button = TEXT("Left"), const FString& CheckLocator = TEXT(""), const FString& WindowFilter = TEXT(""), int32 MatchIndex = 0, bool bRejectViewport = false);
 
 	/** 指针从当前位置分 Frames 帧线性移到坐标处；有键按住时就是拖动。结果含 pos, hit, dragging */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
@@ -138,6 +138,10 @@ public:
 	/** 在坐标处滚一次滚轮（正数向上）。结果含 handled：事件路径上有没有控件处理，不代表内容真的动了 */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
 	static FString MouseWheel(float X, float Y, float Delta);
+
+	/** 对标 SScrollBox::ScrollDescendantIntoView；下标来自诊断查询，AncestorIndex=0 为最近滚动祖先；不创建虚拟列表条目 */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")
+	static FString ScrollDescendantIntoView(const FString& Locator, const FString& WindowFilter, int32 MatchIndex = 0, int32 AncestorIndex = 0, bool bAnimate = false, int32 Destination = 0);
 
 	/** 时间线上等待：至少 Seconds 秒且至少 Frames 帧 */
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|SlateDriver")

@@ -23,6 +23,7 @@
 #include "Widgets/Input/SEditableText.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
+#include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
 #include "Widgets/Text/SMultiLineEditableText.h"
 #include "Widgets/Text/SRichTextBlock.h"
@@ -1724,7 +1725,7 @@ FString UAgentSlateDriverFunctionLib::MouseDown(float X, float Y, const FString&
 	return SDQueued(RequestId, ExtraFields);
 }
 
-FString UAgentSlateDriverFunctionLib::MouseUp(const FString& Button)
+FString UAgentSlateDriverFunctionLib::MouseUp(const FString& Button, const FString& CheckLocator, const FString& WindowFilter, int32 MatchIndex, bool bRejectViewport)
 {
 	if (!FSlateApplication::IsInitialized())
 	{
@@ -1735,7 +1736,7 @@ FString UAgentSlateDriverFunctionLib::MouseUp(const FString& Button)
 	{
 		return SDResult(false, FString::Printf(TEXT("Unknown mouse button: %s"), *Button));
 	}
-	const int32 RequestId = SDTimelineAdd([ButtonKey](int32 Id)
+	const int32 RequestId = SDTimelineAdd([ButtonKey, CheckLocator, WindowFilter, MatchIndex, bRejectViewport](int32 Id)
 	{
 		if (!SDHeldButtons.Contains(ButtonKey))
 		{
@@ -1743,8 +1744,38 @@ FString UAgentSlateDriverFunctionLib::MouseUp(const FString& Button)
 			return ESDStep::Failed;
 		}
 		const FVector2D Pos = SDPointer();
+		FSlateApplication& SlateApp = FSlateApplication::Get();
+		const FWidgetPath Path = SlateApp.LocateWindowUnderMouse(Pos, SlateApp.GetInteractiveTopLevelWindows(), false);
+		TArray<FString> Fields = {AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)), AgentJson::PairRaw(TEXT("hit_before"), SDPathHitJson(Path))};
+		FString Error, HitVia;
+		if (!CheckLocator.IsEmpty())
+		{
+			FSDMatch Match;
+			if (SDResolveMatch(CheckLocator, WindowFilter, MatchIndex, Fields, Match, Error)
+				&& !SDHitsTarget(Path, Match.Widget, Pos, HitVia))
+			{
+				Error = TEXT("Drop target check failed: point is clipped, covered or outside the target path");
+			}
+		}
+		else if (bRejectViewport && (!Path.IsValid() || Path.Widgets.Last().Widget->GetType() == FName(TEXT("SViewport"))))
+		{
+			Error = TEXT("Drop point has no target or only hits SViewport; supply an explicit drop target if this is intended");
+		}
+		if (!Error.IsEmpty())
+		{
+			SlateApp.CancelDragDrop();
+			SDReleaseButton(ButtonKey);
+			Fields.Add(AgentJson::PairBool(TEXT("released"), true));
+			SDSetInputResult(Id, false, Error, Fields);
+			return ESDStep::Failed;
+		}
 		SDReleaseButton(ButtonKey);
-		SDSetInputResult(Id, true, FString(), {AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)), AgentJson::PairRaw(TEXT("hit"), SDDescribeHit(Pos))});
+		Fields.Add(AgentJson::PairRaw(TEXT("hit"), SDDescribeHit(Pos)));
+		if (!HitVia.IsEmpty())
+		{
+			Fields.Add(AgentJson::Pair(TEXT("hit_via"), HitVia));
+		}
+		SDSetInputResult(Id, true, FString(), Fields);
 		return ESDStep::Done;
 	});
 	return SDQueued(RequestId);
@@ -1801,6 +1832,53 @@ FString UAgentSlateDriverFunctionLib::MouseWheel(float X, float Y, float Delta)
 		return ESDStep::Done;
 	});
 	return SDQueued(RequestId, {AgentJson::PairRaw(TEXT("pos"), SDPointJson(Pos)), AgentJson::PairRaw(TEXT("hit"), SDDescribeHit(Pos))});
+}
+
+FString UAgentSlateDriverFunctionLib::ScrollDescendantIntoView(const FString& Locator, const FString& WindowFilter, int32 MatchIndex, int32 AncestorIndex, bool bAnimate, int32 Destination)
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return SDResult(false, TEXT("Slate is not initialized"));
+	}
+	const FSDLocator Parsed = SDParseLocator(Locator);
+	if (Parsed.IsEmpty() || AncestorIndex < 0 || Destination < 0 || Destination > 3)
+	{
+		return SDResult(false, TEXT("A locator, non-negative scroll ancestor index and destination in 0..3 are required"));
+	}
+	TArray<FSDMatch> Matches;
+	SDFindMatches(Parsed, WindowFilter, Matches, true);
+	if (!Matches.IsValidIndex(MatchIndex) || !Matches[MatchIndex].bGeometryValid)
+	{
+		return SDResult(false, TEXT("Scroll target is missing, hidden or not arranged; scrolling cannot create virtualized items"));
+	}
+	const TWeakPtr<SWidget> Target = Matches[MatchIndex].Widget;
+	const int32 RequestId = SDTimelineAdd([Target, AncestorIndex, bAnimate, Destination](int32 Id)
+	{
+		const TSharedPtr<SWidget> Widget = Target.Pin();
+		if (!Widget.IsValid())
+		{
+			SDSetInputResult(Id, false, TEXT("Scroll target was destroyed"));
+			return ESDStep::Failed;
+		}
+		int32 Index = 0;
+		for (TSharedPtr<SWidget> Parent = Widget->GetParentWidget(); Parent.IsValid(); Parent = Parent->GetParentWidget())
+		{
+			if (!Parent->GetVisibility().IsVisible())
+			{
+				SDSetInputResult(Id, false, TEXT("Scroll target has a hidden ancestor"));
+				return ESDStep::Failed;
+			}
+			if (Parent->GetType() == FName(TEXT("SScrollBox")) && Index++ == AncestorIndex)
+			{
+				StaticCastSharedPtr<SScrollBox>(Parent)->ScrollDescendantIntoView(Widget, bAnimate, static_cast<EDescendantScrollDestination>(Destination));
+				SDSetInputResult(Id, true, FString());
+				return ESDStep::Done;
+			}
+		}
+		SDSetInputResult(Id, false, TEXT("No SScrollBox at the requested ancestor index"));
+		return ESDStep::Failed;
+	});
+	return SDQueued(RequestId, {AgentJson::PairRaw(TEXT("target"), SDMatchJson(Matches[MatchIndex]))});
 }
 
 // ==================== 等待与释放 ====================

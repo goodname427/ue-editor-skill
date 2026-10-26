@@ -82,16 +82,16 @@ python scripts/ue_cli.py exec --file do_rename.py --timeout 300             # �
 | `api` | API 内省：`search <关键词>` / `methods <类名>` / `help <类名> [方法名]` |
 | `pie` | PIE 启停、状态与世界上下文：`start` / `stop` / `status` / `worlds`（启停需配合 `--wait-until`，见 docstring） |
 | `open_asset` | 打开资产编辑器（WBP 设计器、蓝图等） |
-| `wbp_edit` | 改 WBP 并把改动落盘：`list` / `rename` / `set [--slot]` / `add` / `replace` / `remove` / `save`；改控件默认编译保存，`--no-save` 攒下的改动用 `save` 统一收尾 |
+| `wbp_edit` | 改 WBP 并把改动落盘：`list` / `rename` / `set [--slot]` / `add` / `insert-before` / `insert-after` / `replace` / `remove` / `save`；改控件默认编译保存，`--no-save` 攒下的改动用 `save` 统一收尾 |
 | `asset_move` | 批量移动/改名资产与引用检查：`check` 先看存在性与引用方，`move` 移动（`--save-referencers`），`redirectors <目录>` 列旧路径残留 |
-| `ui` | 查看与操作编辑器界面：`windows` / `tree` / `find` / `at` / `focus` / `click` / `type` / `key` / `scroll` / `keydown` / `keyup` / `mousedown` / `mouseup` / `move` / `drag` / `release`（依赖 AgentTools） |
+| `ui` | 查看与操作编辑器界面：`windows` / `tree` / `find` / `at` / `focus` / `click` / `type` / `key` / `scroll` / `scroll-into-view` / `keydown` / `keyup` / `mousedown` / `mouseup` / `move` / `drag` / `release`（依赖 AgentTools） |
 | `hold-until.sequence.json` | 按住一个键直到条件成立再抬起：`sequence --action hold-until --param key=<键> --param "until=<表达式>"` |
 
 ### Skill lib（`import`）
 
 | 模块 | 内容 |
 |------|------|
-| `ue_input` | 控件查询（`find` / `find_one` / `match` / `center` / `widget_at` / `read_text` / `describe`）与界面输入（`click` / `key` / `drag` / `scroll` / `input_text` / `focus`，以及 `key_down` 等原子步骤），见 [slate_driver.md](slate_driver.md#ue_input-组合) |
+| `ue_input` | 控件查询（`find` / `find_one` / `match` / `center` / `widget_at` / `read_text` / `describe`）与界面输入（`click` / `key` / `drag` / `scroll` / `scroll_into_view` / `input_text` / `focus`，以及 `key_down` 等原子步骤），见 [slate_driver.md](slate_driver.md#ue_input-组合) |
 | `ue_wbp` | Widget 蓝图读写：控件树、属性、增删换控件、动画、事件、函数、继承链、编译保存，见 [widget_blueprint_info.md](widget_blueprint_info.md) |
 | `ue_common` | 取 AgentTools 函数库、解析它返回的 JSON |
 

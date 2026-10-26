@@ -42,8 +42,8 @@ def check(expr):
 
 # ---------- 查询 ----------
 
-def find(locator, window=''):
-    return parse(LIB.find_widgets(locator, window))
+def find(locator, window='', include_hidden=False):
+    return parse(LIB.find_widgets(locator, window, True) if include_hidden else LIB.find_widgets(locator, window))
 
 
 def find_one(locator, window=''):
@@ -85,7 +85,8 @@ def describe(n, prefix=''):
         parts.append('!geometry')
     if n.get('query_only'):
         parts.append('!query-only')
-    return ' '.join(parts).replace('\r', '\\r').replace('\n', '\\n')
+    return (' '.join(parts).replace('\r', '\\r').replace('\n', '\\n')
+            .replace('\u0085', '\\u0085').replace('\u2028', '\\u2028').replace('\u2029', '\\u2029'))
 
 
 def match(locator, window='', index=0):
@@ -141,8 +142,8 @@ def mouse_down(x, y, button='Left', double=False, check_locator='', window='', i
     return _queued(LIB.mouse_down(x, y, button, double, check_locator, window, index, max_hold))
 
 
-def mouse_up(button='Left'):
-    return _queued(LIB.mouse_up(button))
+def mouse_up(button='Left', check_locator='', window='', index=0, reject_viewport=False):
+    return _queued(LIB.mouse_up(button, check_locator, window, index, reject_viewport))
 
 
 def move(x, y, frames=1):
@@ -386,11 +387,27 @@ def check_analog(result):
     return json.dumps(state, ensure_ascii=False)
 
 
-def drag(start, end, frames=20, button='Left', check_locator='', window='', index=0):
+def drag(start, end, frames=20, button='Left', check_locator='', window='', index=0, drop_target='', drop_index=0, check_drop=True):
     down = mouse_down(start[0], start[1], button, False, check_locator, window, index)
     move(end[0], end[1], frames)
-    mouse_up(button)
-    return down
+    up = mouse_up(button, drop_target if check_drop else '', window, drop_index, check_drop)
+    return dict(down, release_request_id=up['request_id'])
+
+
+def scroll_into_view(locator, window='', index=0, ancestor=0):
+    """请求一个 ScrollBox 将已有后代滚入可视区，等三帧并回读；下标来自诊断查询。"""
+    result = _queued(LIB.scroll_descendant_into_view(locator, window, index, ancestor, False, 2))
+    ready = wait(0, 3)
+    check('__import__("ue_input").check_visible(%r, %r, %d)' % (locator, window, index))
+    return dict(result, ready_request_id=ready['request_id'])
+
+
+def check_visible(locator, window='', index=0):
+    nodes = parse(LIB.find_widgets(locator, window, True))
+    node = nodes[index] if 0 <= index < len(nodes) else None
+    rect = node.get('visible_rect', node['rect']) if node else [0, 0, 0, 0]
+    ok = bool(node and node.get('geometry_valid') and rect[2] > 0 and rect[3] > 0)
+    return json.dumps({'ok': ok, 'target': node, 'message': '' if ok else 'Scroll target is still hidden or fully clipped'}, ensure_ascii=False)
 
 
 def scroll(x, y, delta, frames=8):

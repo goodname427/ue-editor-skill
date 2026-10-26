@@ -105,9 +105,10 @@ C++ 只提供下表这些原子步骤，**点击、长按、按键、拖动、�
 | `set_cursor_position(x, y)` | 对标 Slate 光标位置；使用虚拟光标时不移动 OS 光标 | — |
 | `set_cursor_visibility(visible)` | 对标 SlateUser 显隐；作用于当前绑定光标 | — |
 | `mouse_down(x, y, button, double, check_locator, window, index, max_hold=30)` | 先把指针移到落点再按下；`double=True` 时发双击事件。校验目标/子节点；透明目标也可命中实际祖先，但目标几何须包含落点、落点须在有效裁剪区内，路径可见且可用。相邻/遮挡/禁用/裁剪外仍失败、不发按下 | `hit`, `hit_via`（仅祖先路由） |
-| `mouse_up(button)` | 在当前指针位置抬起 | `pos`, `hit` |
+| `mouse_up(button, check_locator='', window='', index=0, reject_viewport=False)` | 在当前指针位置抬起；可选释放前目标校验使用指针下的真实路径、不使用捕获者路径。失败取消当前拖放并立即释放本库按钮 | `pos`, `hit_before`, `hit`, `released`（失败清理时） |
 | `mouse_move(x, y, frames=1)` | 分 `frames` 帧线性移过去；有键按住时就是拖动。最后一步后保持悬停 10 秒，后续 move 续期；不会移动系统光标 | `pos`, `hit`, `dragging`, `hover_seconds` |
 | `mouse_wheel(x, y, delta)` | 滚一次滚轮（正数向上） | `handled` |
+| `scroll_descendant_into_view(locator, window, index=0, ancestor=0, animate=False, destination=0)` | 对标原生 ScrollBox 滚入已有后代；index 来自诊断集合，ancestor=0 是最近 ScrollBox，destination=0/1/2/3 为 IntoView/TopOrLeft/Center/BottomOrRight | `target`（排队快照） |
 | `wait_input(seconds, frames)` | 时间线上等待，秒数和帧数都满足才算完成 | — |
 | `release_all_input()` | **不排队**，下一帧就取消所有未完成的步骤，并抬起本库按住的全部键 | `released` |
 
@@ -125,11 +126,12 @@ C++ 只提供下表这些原子步骤，**点击、长按、按键、拖动、�
 | `key(name, ctrl, shift, alt, hold=0)` | `key_down` → `wait_input(hold, 1)` → `key_up`，抬起至少比按下晚两帧 |
 | `analog_set(values, device_id=-1)` | 先校验整批六类轴键/值；摇杆补齐另一轴，同次调用同步发事件；**不保持、不自动归零** |
 | `analog(values, hold=0, device_id=-1)` | 等待既有时间线 gate → Python Slate 回调逐帧发配对轴 → hold 到期归零并注销；hold 在 0~30 秒，0 为一次脉冲；用 `check_analog(job)` 回读 |
-| `drag(start, end, frames=20, button, check_locator, window, index)` | `mouse_down` → `mouse_move(frames)` → `mouse_up` |
+| `drag(start, end, frames=20, button, check_locator, window, index, drop_target='', drop_index=0, check_drop=True)` | `mouse_down` → `mouse_move(frames)` → 受校验 `mouse_up`；显式 drop_target 核实终点/子节点或有效透明祖先，否则默认拒绝空路径和 SViewport；返回 release_request_id。不证明业务接受了 Drop |
+| `scroll_into_view(locator, window='', index=0, ancestor=0)` | 诊断下标定位已有后代 → 原生无动画居中请求 → 等三帧 → check_visible；一次只滚一个 ScrollBox，嵌套滚动由 sequence 分步选择 ancestor。不创建虚拟化条目、不修复 Hidden/Collapsed；确认后重新定位再点击 |
 | `scroll(x, y, delta, frames=8)` | 排队前先用 `widget_at` 记下落点控件 → `mouse_wheel` → `wait_input(0, frames)` → 回读：落点控件的 `type` / `name` / `rect` 变了才算 `moved` |
 | `input_text(locator, text, window, index, replace=True, commit=False)` | `focus_widget` → `select_all_text`（replace 时）→ `type_text` →（commit 时）`key('Enter')` → `wait_input(0, 2)` → 回读文字，不等于预期就失败。追加模式的预期值是旧值加新文字。控件已消失时记为 `(target destroyed)`，视为通过 |
 
-模块还提供查询辅助：`find`、`find_one`、`match`、`center`、`widget_at`、`read_text`、`describe`（控件节点摘要，`ui` 的输出就用它），以及 `parse`（解析 JSON，`success=false` 时抛异常）。`describe` 已转义 CR/LF、文本引号和反斜杠；U+0085 / U+2028 / U+2029 行分隔符尚未显式转义，不保证包含这些字符的摘要仍为单行。
+模块还提供查询辅助：`find`、`find_one`、`match`、`center`、`widget_at`、`read_text`、`describe`（控件节点摘要，`ui` 的输出就用它），以及 `parse`（解析 JSON，`success=false` 时抛异常）。`describe` 已转义 CR/LF、文本引号、反斜杠与 U+0085 / U+2028 / U+2029 行分隔符。诊断查询用 `find(locator, window='', include_hidden=True)`；结果只用于诊断或滚入准备，点击前须重查默认可见集合。
 
 **与 CLI 的约定**：每个原子步骤打印一行 `[input-request] <id> [秒]`；需要回读的组合再打印一行 `[input-check] <表达式>`，这个表达式必须返回含 `ok` 字段的 JSON 字符串。`exec` / `sequence` 执行完脚本后，按输出顺序等每个请求完成；某个检查表达式会在它之前的请求都完成后才求值。任一步失败时报 `InputAssertionFailed`，等待超时报 `InputWaitTimeout`。所以调用方不要自己 sleep 或轮询。在 CLI 之外直接调用 C++ 时，要自己用 `get_input_result` 确认结果，不能把排队成功当作已经生效。
 

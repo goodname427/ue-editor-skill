@@ -92,6 +92,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AgentTools|WidgetBlueprintEdit")
 	static FString SetWidgetProperty(const FString& AssetPath, const FString& WidgetName, const FString& PropertyName, const FString& PropertyValue, bool bSlot = false);
 
+	/** 对标 UPanelWidget::ShiftChild，移动同父控件下的插槽，保留插槽实例与属性 */
+	UFUNCTION(BlueprintCallable, Category = "AgentTools|WidgetBlueprintEdit")
+	static FString ShiftChild(const FString& AssetPath, const FString& WidgetName, int32 Index);
+
 	/**
 	 * 给蓝图函数加一个参数
 	 * @param PinType 用 BlueprintEditorLibrary 的 GetBasicTypeByName / GetObjectReferenceType / GetStructType 等构造
