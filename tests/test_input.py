@@ -221,6 +221,28 @@ class AnalogTests(unittest.TestCase):
         self.assertFalse(self.callbacks)
         self.lib.analog_input.assert_not_called()
 
+    def test_describe_escapes_multiline_text_fields(self):
+        text = '\u4e2d\u6587\r\n"quoted"\\path\rend\n'
+        node = {'type': 'STextBlock', 'rect': [1, 2, 3, 4],
+                'text': text, 'hint': text, 'label': text}
+        line = self.input.describe(node)
+        self.assertEqual(len(line.splitlines()), 1)
+        encoded = json.dumps(text, ensure_ascii=False)
+        self.assertIn(' ' + encoded, line)
+        self.assertIn('hint=' + encoded, line)
+        self.assertIn('label=' + encoded, line)
+        node.update(tag='tag\r\n', owner='owner\n', hidden_by='parent\r')
+        self.assertEqual(len(self.input.describe(node).splitlines()), 1)
+        self.assertEqual(self.input.describe(None), '(none)')
+
+    def test_center_prefers_visible_rect(self):
+        node = {'type': 'STextBlock', 'rect': [100, 200, 80, 100],
+                'visible_rect': [100, 200, 80, 20], 'clipped': True}
+        self.assertEqual(self.input.center(node), (140, 210))
+        self.assertIn('visible=[100,200,80,20]', self.input.describe(node))
+        self.assertIn('!clipped', self.input.describe(node))
+        self.assertEqual(self.input.center({'rect': [100, 200, 80, 100]}), (140, 250))
+
     def test_zero_failure_is_reported(self):
         result = self.input.analog({'Gamepad_LeftTriggerAxis': 1})
         self.tick(0)

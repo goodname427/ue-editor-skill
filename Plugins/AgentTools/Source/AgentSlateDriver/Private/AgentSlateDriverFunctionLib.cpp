@@ -12,6 +12,7 @@
 #include "HAL/IConsoleManager.h"
 #include "InputCoreTypes.h"
 #include "Layout/ArrangedChildren.h"
+#include "Layout/Clipping.h"
 #include "Layout/WidgetPath.h"
 #include "Misc/ScopeExit.h"
 #include "Types/ReflectionMetadata.h"
@@ -26,6 +27,11 @@
 #include "Widgets/Text/SMultiLineEditableText.h"
 #include "Widgets/Text/SRichTextBlock.h"
 #include "Widgets/Text/STextBlock.h"
+
+#if WITH_DEV_AUTOMATION_TESTS
+#include "Misc/AutomationTest.h"
+#include "Widgets/Layout/SBorder.h"
+#endif
 
 // ==================== JSON辅助 ====================
 
@@ -512,6 +518,49 @@ static void SDDumpNode(const FArrangedWidget& Arranged, int32 Depth, bool bInRoo
 	}
 }
 
+static bool SDPushClip(const FArrangedWidget& Arranged, FSlateClippingManager& Clipping)
+{
+	bool bClipToBounds, bAlwaysClip, bIntersectClipBounds;
+	Arranged.Widget->CalculateCullingAndClippingRules(Arranged.Geometry, Arranged.Geometry.GetRenderBoundingRect(), bClipToBounds, bAlwaysClip, bIntersectClipBounds);
+	if (bClipToBounds)
+	{
+		FSlateClippingZone Zone(Arranged.Geometry);
+		Zone.SetShouldIntersectParent(bIntersectClipBounds);
+		Zone.SetAlwaysClip(bAlwaysClip);
+		Clipping.PushClip(Zone);
+	}
+	return bClipToBounds;
+}
+
+static FSlateRect SDVisibleRect(const FSDWidgetInfo& Info, const FSlateClippingManager& Clipping)
+{
+	FSlateRect Rect(Info.Pos.X, Info.Pos.Y, Info.Pos.X + Info.Size.X, Info.Pos.Y + Info.Size.Y);
+	const TOptional<FSlateClippingState> State = Clipping.GetActiveClippingState();
+	if (State.IsSet())
+	{
+		auto Intersect = [&Rect](const FSlateClippingZone& Zone)
+		{
+			const FSlateRect Bounds = Zone.GetBoundingBox();
+			Rect.Left = FMath::Max(Rect.Left, Bounds.Left);
+			Rect.Top = FMath::Max(Rect.Top, Bounds.Top);
+			Rect.Right = FMath::Max(Rect.Left, FMath::Min(Rect.Right, Bounds.Right));
+			Rect.Bottom = FMath::Max(Rect.Top, FMath::Min(Rect.Bottom, Bounds.Bottom));
+		};
+		if (State->ScissorRect.IsSet())
+		{
+			Intersect(State->ScissorRect.GetValue());
+		}
+		else
+		{
+			for (const FSlateClippingZone& Zone : State->StencilQuads)
+			{
+				Intersect(Zone);
+			}
+		}
+	}
+	return Rect;
+}
+
 struct FSDMatch
 {
 	FString WindowTitle;
@@ -519,11 +568,21 @@ struct FSDMatch
 	TSharedPtr<SWidget> Widget;
 	bool bQueryOnly = false;
 	bool bGeometryValid = true;
+	bool bClipped = false;
+	FSlateRect VisibleRect;
 	FString HiddenBy;
 };
 
-static void SDFindNode(const FArrangedWidget& Arranged, const FSDLocator& Locator, const FString& WindowTitle, TArray<FSDMatch>& OutMatches, bool bIncludeHidden = false, FString HiddenBy = FString(), bool bGeometryValid = true)
+static void SDFindNode(const FArrangedWidget& Arranged, FSlateClippingManager& Clipping, const FSDLocator& Locator, const FString& WindowTitle, TArray<FSDMatch>& OutMatches, bool bIncludeHidden = false, FString HiddenBy = FString(), bool bGeometryValid = true)
 {
+	const bool bPushedClip = bGeometryValid && SDPushClip(Arranged, Clipping);
+	ON_SCOPE_EXIT
+	{
+		if (bPushedClip)
+		{
+			Clipping.PopClip();
+		}
+	};
 	FSDWidgetInfo Info = SDMakeInfo(Arranged);
 	if (HiddenBy.IsEmpty() && !Arranged.Widget->GetVisibility().IsVisible())
 	{
@@ -533,13 +592,23 @@ static void SDFindNode(const FArrangedWidget& Arranged, const FSDLocator& Locato
 	const bool bNodeGeometryValid = bGeometryValid && Info.Size.X > 0 && Info.Size.Y > 0;
 	if ((bIncludeHidden || bNodeGeometryValid) && SDMatchLocator(Info, Locator))
 	{
-		FSDMatch& Match = OutMatches.AddDefaulted_GetRef();
-		Match.WindowTitle = WindowTitle;
-		Match.Info = MoveTemp(Info);
-		Match.Widget = Arranged.Widget;
-		Match.bQueryOnly = bIncludeHidden;
-		Match.bGeometryValid = bNodeGeometryValid;
-		Match.HiddenBy = HiddenBy;
+		const FSlateRect VisibleRect = SDVisibleRect(Info, Clipping);
+		const bool bOnScreen = bNodeGeometryValid && VisibleRect.Right > VisibleRect.Left && VisibleRect.Bottom > VisibleRect.Top;
+		if (bIncludeHidden || bOnScreen)
+		{
+			FSDMatch& Match = OutMatches.AddDefaulted_GetRef();
+			Match.WindowTitle = WindowTitle;
+			Match.bClipped = bNodeGeometryValid && (FMath::RoundToInt(VisibleRect.Left) != FMath::RoundToInt(Info.Pos.X)
+				|| FMath::RoundToInt(VisibleRect.Top) != FMath::RoundToInt(Info.Pos.Y)
+				|| FMath::RoundToInt(VisibleRect.Right - VisibleRect.Left) != FMath::RoundToInt(Info.Size.X)
+				|| FMath::RoundToInt(VisibleRect.Bottom - VisibleRect.Top) != FMath::RoundToInt(Info.Size.Y));
+			Match.VisibleRect = VisibleRect;
+			Match.Info = MoveTemp(Info);
+			Match.Widget = Arranged.Widget;
+			Match.bQueryOnly = bIncludeHidden;
+			Match.bGeometryValid = bNodeGeometryValid;
+			Match.HiddenBy = HiddenBy;
+		}
 	}
 	FArrangedChildren Children(bIncludeHidden ? EVisibility::All : EVisibility::Visible, true);
 	Arranged.Widget->ArrangeChildren(Arranged.Geometry, Children);
@@ -550,7 +619,7 @@ static void SDFindNode(const FArrangedWidget& Arranged, const FSDLocator& Locato
 		{
 			ArrangedWidgets.Add(&Children[ChildIndex].Widget.Get());
 		}
-		SDFindNode(Children[ChildIndex], Locator, WindowTitle, OutMatches, bIncludeHidden, HiddenBy, bGeometryValid);
+		SDFindNode(Children[ChildIndex], Clipping, Locator, WindowTitle, OutMatches, bIncludeHidden, HiddenBy, bGeometryValid);
 	}
 	if (bIncludeHidden)
 	{
@@ -561,7 +630,7 @@ static void SDFindNode(const FArrangedWidget& Arranged, const FSDLocator& Locato
 			const TSharedRef<SWidget> Child = StructuralChildren->GetChildAt(Index);
 			if (!ArrangedWidgets.Contains(&Child.Get()))
 			{
-				SDFindNode(FArrangedWidget(Child, FGeometry()), Locator, WindowTitle, OutMatches, true, HiddenBy, false);
+				SDFindNode(FArrangedWidget(Child, FGeometry()), Clipping, Locator, WindowTitle, OutMatches, true, HiddenBy, false);
 			}
 		}
 	}
@@ -573,7 +642,8 @@ static void SDFindMatches(const FSDLocator& Locator, const FString& WindowFilter
 	SDGetWindows(WindowFilter, Windows);
 	for (const TSharedRef<SWindow>& Window : Windows)
 	{
-		SDFindNode(FArrangedWidget(Window, Window->GetWindowGeometryInScreen()), Locator, Window->GetTitle().ToString(), OutMatches, bIncludeHidden);
+		FSlateClippingManager Clipping;
+		SDFindNode(FArrangedWidget(Window, Window->GetWindowGeometryInScreen()), Clipping, Locator, Window->GetTitle().ToString(), OutMatches, bIncludeHidden);
 	}
 }
 
@@ -582,6 +652,12 @@ static FString SDMatchJson(const FSDMatch& Match)
 	TArray<FString> Fields;
 	Fields.Add(AgentJson::Pair(TEXT("window"), Match.WindowTitle));
 	Fields.Append(SDNodeFields(Match.Info, Match.Widget.ToSharedRef()));
+	if (Match.bClipped)
+	{
+		Fields.Add(AgentJson::PairBool(TEXT("clipped"), true));
+		Fields.Add(AgentJson::PairRaw(TEXT("visible_rect"), SDRectJson(FVector2D(Match.VisibleRect.Left, Match.VisibleRect.Top),
+			FVector2D(Match.VisibleRect.Right - Match.VisibleRect.Left, Match.VisibleRect.Bottom - Match.VisibleRect.Top))));
+	}
 	if (Match.bQueryOnly)
 	{
 		Fields.Add(AgentJson::PairBool(TEXT("query_only"), true));
@@ -1210,6 +1286,7 @@ static bool SDHitsTarget(const FWidgetPath& Path, const TSharedPtr<SWidget>& Tar
 	{
 		return false;
 	}
+	FSlateClippingManager Clipping;
 	for (int32 Index = 0; Index < TargetPath.Widgets.Num(); ++Index)
 	{
 		const TSharedRef<SWidget>& Widget = TargetPath.Widgets[Index].Widget;
@@ -1217,6 +1294,12 @@ static bool SDHitsTarget(const FWidgetPath& Path, const TSharedPtr<SWidget>& Tar
 		{
 			return false;
 		}
+		SDPushClip(TargetPath.Widgets[Index], Clipping);
+	}
+	const TOptional<FSlateClippingState> State = Clipping.GetActiveClippingState();
+	if (State.IsSet() && !State->IsPointInside(Pos))
+	{
+		return false;
 	}
 	HitVia = SDFindOwnerName(Top);
 	if (HitVia.IsEmpty())
@@ -1225,6 +1308,81 @@ static bool SDHitsTarget(const FWidgetPath& Path, const TSharedPtr<SWidget>& Tar
 	}
 	return true;
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSDClippingTest, "AgentTools.Slate.Clipping", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSDClippingTest::RunTest(const FString& Parameters)
+{
+	const TSharedRef<STextBlock> Text = SNew(STextBlock).Text(FText::FromString(TEXT("ClipTarget"))).Visibility(EVisibility::HitTestInvisible);
+	const FSDLocator Locator = SDParseLocator(TEXT("text=ClipTarget"));
+	FSlateClippingManager Clipping;
+	Clipping.PushClip(FSlateClippingZone(FSlateRect(0, 0, 100, 100)));
+	const FArrangedWidget Partial(Text, FGeometry::MakeRoot(FVector2D(80, 100), FSlateLayoutTransform(FVector2D(10, 80))));
+	TArray<FSDMatch> Matches;
+	SDFindNode(Partial, Clipping, Locator, FString(), Matches);
+	TestEqual(TEXT("Partially clipped target remains queryable"), Matches.Num(), 1);
+	if (Matches.Num() == 1)
+	{
+		TestTrue(TEXT("Partial clipping is marked"), Matches[0].bClipped);
+		TestEqual(TEXT("Visible bottom uses parent clip"), Matches[0].VisibleRect.Bottom, 100.0f);
+	}
+	const FArrangedWidget Outside(Text, FGeometry::MakeRoot(FVector2D(80, 100), FSlateLayoutTransform(FVector2D(10, 120))));
+	Matches.Reset();
+	SDFindNode(Outside, Clipping, Locator, FString(), Matches);
+	TestEqual(TEXT("Fully clipped target is excluded"), Matches.Num(), 0);
+	SDFindNode(Outside, Clipping, Locator, FString(), Matches, true);
+	TestEqual(TEXT("Diagnostic query retains clipped target"), Matches.Num(), 1);
+	if (Matches.Num() == 1)
+	{
+		TestTrue(TEXT("Diagnostic target is clipped and query-only"), Matches[0].bClipped && Matches[0].bQueryOnly);
+		TestEqual(TEXT("Fully clipped target has no visible height"), Matches[0].VisibleRect.Bottom - Matches[0].VisibleRect.Top, 0.0f);
+	}
+	Text->SetClipping(EWidgetClipping::ClipToBoundsWithoutIntersecting);
+	Matches.Reset();
+	SDFindNode(Outside, Clipping, Locator, FString(), Matches);
+	TestEqual(TEXT("WithoutIntersecting resets ordinary parent clip"), Matches.Num(), 1);
+	TestEqual(TEXT("Traversal restores parent clip stack"), Clipping.GetStackDepth(), 1);
+	Clipping.ResetClippingState();
+	FSlateClippingZone Always(FSlateRect(0, 0, 100, 100));
+	Always.SetAlwaysClip(true);
+	Clipping.PushClip(Always);
+	Matches.Reset();
+	SDFindNode(Outside, Clipping, Locator, FString(), Matches);
+	TestEqual(TEXT("AlwaysClip cannot be escaped"), Matches.Num(), 0);
+	Text->SetClipping(EWidgetClipping::Inherit);
+
+	const TSharedRef<SBorder> Border = SNew(SBorder).Padding(FMargin(0, 120, 0, -120)).Clipping(EWidgetClipping::ClipToBounds)[Text];
+	const TSharedRef<SWindow> Window = SNew(SWindow).ClientSize(FVector2D(200, 100)).CreateTitleBar(false).SupportsMaximize(false).SupportsMinimize(false)[Border];
+	FSlateApplication::Get().AddWindow(Window, false);
+	ON_SCOPE_EXIT
+	{
+		FSlateApplication::Get().RequestDestroyWindow(Window);
+	};
+	Window->SlatePrepass();
+	FWidgetPath TargetPath;
+	if (!TestTrue(TEXT("Fixture target has an arranged path"), FSlateApplication::Get().GeneratePathToWidgetUnchecked(Text, TargetPath)))
+	{
+		return false;
+	}
+	const FWidgetPath AncestorPath = TargetPath.GetPathDownTo(Window);
+	const FGeometry& Geometry = TargetPath.Widgets.Last().Geometry;
+	const FVector2D Pos = Geometry.LocalToAbsolute(Geometry.GetLocalSize() * 0.5f);
+	FString HitVia;
+	TestFalse(TEXT("Clipped transparent target cannot fall through to an ancestor"), SDHitsTarget(AncestorPath, Text, Pos, HitVia));
+	Border->SetPadding(FMargin(0));
+	FSlateApplication::Get().GeneratePathToWidgetUnchecked(Text, TargetPath);
+	const FGeometry& VisibleGeometry = TargetPath.Widgets.Last().Geometry;
+	const FVector2D VisiblePos = VisibleGeometry.LocalToAbsolute(VisibleGeometry.GetLocalSize() * 0.5f);
+	TestTrue(TEXT("Visible transparent target retains ancestor routing"), SDHitsTarget(AncestorPath, Text, VisiblePos, HitVia));
+	Border->SetEnabled(false);
+	TestFalse(TEXT("Disabled ancestor still rejects input"), SDHitsTarget(AncestorPath, Text, VisiblePos, HitVia));
+	TestFalse(TEXT("Unrelated target still rejects input"), SDHitsTarget(AncestorPath, SNew(STextBlock), VisiblePos, HitVia));
+	TestTrue(TEXT("Contains operator remains literal"), SDMatchLocator(SDMakeInfo(Partial), SDParseLocator(TEXT("text~=Target"))));
+	TestFalse(TEXT("Contains operator is not a regex"), SDMatchLocator(SDMakeInfo(Partial), SDParseLocator(TEXT("text~=^ClipTarget$"))));
+	return true;
+}
+#endif
 
 static FString SDPathHitJson(const FWidgetPath& Path)
 {

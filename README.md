@@ -71,6 +71,12 @@ python install.py --uninstall --skills ~/.codebuddy/skills --rules ~/.codebuddy/
 
 插件仅编辑器使用（`Type: Editor`），不进入打包产物；工程用版本控制时，可把 `Plugins/AgentTools/` 加入忽略列表。
 
+## 回归测试
+
+- 本地 Python 测试：`python -m unittest discover -s tests -v`。
+- 编辑器 Slate 裁剪回归：`exec "import unreal; unreal.SystemLibrary.execute_console_command(None, 'Automation RunTests AgentTools.Slate.Clipping')"`，通过 CLI 的 `--log-file <工程日志> --wait-log "Test Completed. Result=" --wait 60` 等终态，并检查结果是成功、无测试错误。覆盖裁剪查询、透明目标祖先路由和 Locator 字面匹配；不写资产或业务数据。
+- 新增 C++ 自动化测试的注册不能只靠 Live Coding：热编译后若报 `No automation tests matched`，经用户确认关闭编辑器、正式编译并重启后再跑。不把编译成功、命令排队或零项测试当通过。
+
 ## 项目知识
 
 Skill 只包含通用能力。项目专属的内容（登录、进入常用界面、业务验证路径等）放在各工程 `.codebuddy/ue-editor/` 下：`lib/`（项目共用函数）、`actions/`（入口脚本与步骤清单）、`references/`（说明），见 `skills/ue-editor/SKILL.md`。

@@ -64,11 +64,11 @@ def describe(n, prefix=''):
     if n.get('tag'):
         parts.append('#' + n['tag'])
     if n.get('text'):
-        parts.append('"' + n['text'].replace('\n', '\\n') + '"')
+        parts.append(json.dumps(n['text'], ensure_ascii=False))
     if n.get('hint'):
-        parts.append('hint="%s"' % n['hint'])
+        parts.append('hint=' + json.dumps(n['hint'], ensure_ascii=False))
     if n.get('label'):
-        parts.append('label="%s"' % n['label'])
+        parts.append('label=' + json.dumps(n['label'], ensure_ascii=False))
     if n.get('vis'):
         parts.append('vis=' + n['vis'])
     if n.get('owner') and n.get('owner') != n.get('name'):
@@ -78,11 +78,14 @@ def describe(n, prefix=''):
         parts.append('!disabled')
     if n.get('hidden_by'):
         parts.append('hidden_by=' + n['hidden_by'])
+    if n.get('clipped'):
+        parts.append('visible=[%d,%d,%d,%d]' % tuple(n['visible_rect']))
+        parts.append('!clipped')
     if n.get('geometry_valid') is False:
         parts.append('!geometry')
     if n.get('query_only'):
         parts.append('!query-only')
-    return ' '.join(parts)
+    return ' '.join(parts).replace('\r', '\\r').replace('\n', '\\n')
 
 
 def match(locator, window='', index=0):
@@ -93,7 +96,7 @@ def match(locator, window='', index=0):
 
 
 def center(node):
-    x, y, w, h = node['rect']
+    x, y, w, h = node.get('visible_rect', node['rect'])
     return x + w / 2.0, y + h / 2.0
 
 

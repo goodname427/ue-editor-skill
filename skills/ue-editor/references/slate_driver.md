@@ -14,7 +14,7 @@
 - **坐标**：所有 `rect` / `pos` 均为桌面绝对像素 `[x, y, w, h]`，可直接传给 `ue_cli.py screenshot --rect=x,y,w,h` 截取该区域（副屏坐标可能为负，须用 `=` 形式）。
 - **Locator**（定位控件）：
   - 纯字符串：按 UMG 控件名、Slate Tag、文本、输入框提示文字、按钮名称精确匹配。例如 `Btn_Confirm`、`保存`、`Search Assets`、`Save Current Level`
-  - `key=value`：精确匹配（不区分大小写）；`key~=value`：包含匹配。key 取 `name` / `tag` / `text` / `hint` / `label` / `type` / `class`
+  - `key=value`：精确匹配（不区分大小写）；`key~=value`：字面包含匹配，不是正则。全字符串匹配用 `text=确认`，不要用 `text~=^确认$`。key 取 `name` / `tag` / `text` / `hint` / `label` / `type` / `class`
   - `label`：无文字的按钮类控件（含已禁用的）的名称，取自折叠隐藏的文字子节点，没有则取 tooltip 第一行；纯图标工具栏按钮靠它识别
   - 多个条件用 `;` 连接，需同时满足。例如 `type=SButton;text~=Compile`
   - `type=` 也匹配模板包装内的类型名：`type=SDesignerView` 能命中 `TToolCompatibleMixin<SDesignerView>`
@@ -63,7 +63,7 @@ print(lib.dump_slate_tree('', 'type=SContentBrowser', 6, False, True, 3000, 0))
 
 ### FindWidgets
 
-查找当前可见分支中命中 Locator 的控件（尺寸为 0 的不算）；父级 Hidden/Collapsed 的子控件也不会命中。空数组不证明蓝图没有该控件，诊断隐藏原因用 `dump_slate_tree` 的 `include_hidden=True`、`compact=False` 查看已有层级与父级可见性，必要时再查蓝图静态结构。
+查找当前可见分支中命中 Locator 的控件（尺寸为 0 的不算）；父级 Hidden/Collapsed 或完全被裁剪的子控件不会命中。部分裁剪返回原始 `rect`，另带 `clipped=true` 和 `visible_rect`；`ue_input.center` 优先取可见区域中心。裁剪沿引擎规则计算，保留 `WithoutIntersecting` 和 `AlwaysClip`；旋转/Stencil 裁剪的 `visible_rect` 只是交集包围盒，透明目标输入还会精确检查落点，不代表一定可点击。空数组不证明蓝图没有该控件，诊断用 `find_widgets(..., include_hidden=True)` 或隐藏控件树，必要时再查蓝图静态结构。
 
 ```python
 print(lib.find_widgets('hint~=Search', ''))
@@ -71,7 +71,7 @@ print(lib.find_widgets('hint~=Search', ''))
 
 - **参数**: `locator` (`str`), `window_filter` (`str`), `include_hidden` (`bool`，默认 false)
 - **返回**: `str` — JSON 数组，每项附 `window`；默认可见查询下标可给其它输入接口。
-- **隐藏诊断**：`lib.find_widgets('name=Btn_Apply', '', True)` 另查已创建隐藏或未参与布局的结构子节点，返回 `query_only=true`、`geometry_valid`、`visible_path` 和可用的 `hidden_by`。隐藏模式下标/几何不可直接用于点击/截图，须重查可见目标；不保证容器未公开或未创建的节点。
+- **隐藏/裁剪诊断**：`lib.find_widgets('name=Btn_Apply', '', True)` 另查已创建隐藏、未参与布局或完全被裁剪的节点，返回 `query_only=true`、`geometry_valid`、`visible_path` 和可用的 `hidden_by`、`clipped` / `visible_rect`。`visible_path=true` 只表示祖先未 Hidden/Collapsed，不表示未裁剪。诊断模式下标/几何不可直接用于点击/截图，须重查可见目标；不保证容器未公开或未创建的节点。滚到可见位置仍须跨帧执行滚动再重新定位，不会由查询或聚焦自动完成。
 
 ### GetKeyboardFocus
 
@@ -104,7 +104,7 @@ C++ 只提供下表这些原子步骤，**点击、长按、按键、拖动、�
 | `use_platform_cursor_for_cursor_user(use_platform)` | 对标引擎平台/虚拟光标选择；同步操作，不自行定时恢复 | 切换前 `pos`, 平台 `visible` |
 | `set_cursor_position(x, y)` | 对标 Slate 光标位置；使用虚拟光标时不移动 OS 光标 | — |
 | `set_cursor_visibility(visible)` | 对标 SlateUser 显隐；作用于当前绑定光标 | — |
-| `mouse_down(x, y, button, double, check_locator, window, index, max_hold=30)` | 先把指针移到落点再按下；`double=True` 时发双击事件。校验目标/子节点；透明目标也可命中实际祖先，但目标几何须包含落点、路径可见且可用。相邻/遮挡/禁用仍失败、不发按下 | `hit`, `hit_via`（仅祖先路由） |
+| `mouse_down(x, y, button, double, check_locator, window, index, max_hold=30)` | 先把指针移到落点再按下；`double=True` 时发双击事件。校验目标/子节点；透明目标也可命中实际祖先，但目标几何须包含落点、落点须在有效裁剪区内，路径可见且可用。相邻/遮挡/禁用/裁剪外仍失败、不发按下 | `hit`, `hit_via`（仅祖先路由） |
 | `mouse_up(button)` | 在当前指针位置抬起 | `pos`, `hit` |
 | `mouse_move(x, y, frames=1)` | 分 `frames` 帧线性移过去；有键按住时就是拖动。最后一步后保持悬停 10 秒，后续 move 续期；不会移动系统光标 | `pos`, `hit`, `dragging`, `hover_seconds` |
 | `mouse_wheel(x, y, delta)` | 滚一次滚轮（正数向上） | `handled` |
@@ -129,7 +129,7 @@ C++ 只提供下表这些原子步骤，**点击、长按、按键、拖动、�
 | `scroll(x, y, delta, frames=8)` | 排队前先用 `widget_at` 记下落点控件 → `mouse_wheel` → `wait_input(0, frames)` → 回读：落点控件的 `type` / `name` / `rect` 变了才算 `moved` |
 | `input_text(locator, text, window, index, replace=True, commit=False)` | `focus_widget` → `select_all_text`（replace 时）→ `type_text` →（commit 时）`key('Enter')` → `wait_input(0, 2)` → 回读文字，不等于预期就失败。追加模式的预期值是旧值加新文字。控件已消失时记为 `(target destroyed)`，视为通过 |
 
-模块还提供查询辅助：`find`、`find_one`、`match`、`center`、`widget_at`、`read_text`、`describe`（控件节点的一行文字，`ui` 的输出就用它），以及 `parse`（解析 JSON，`success=false` 时抛异常）。
+模块还提供查询辅助：`find`、`find_one`、`match`、`center`、`widget_at`、`read_text`、`describe`（控件节点摘要，`ui` 的输出就用它），以及 `parse`（解析 JSON，`success=false` 时抛异常）。`describe` 已转义 CR/LF、文本引号和反斜杠；U+0085 / U+2028 / U+2029 行分隔符尚未显式转义，不保证包含这些字符的摘要仍为单行。
 
 **与 CLI 的约定**：每个原子步骤打印一行 `[input-request] <id> [秒]`；需要回读的组合再打印一行 `[input-check] <表达式>`，这个表达式必须返回含 `ok` 字段的 JSON 字符串。`exec` / `sequence` 执行完脚本后，按输出顺序等每个请求完成；某个检查表达式会在它之前的请求都完成后才求值。任一步失败时报 `InputAssertionFailed`，等待超时报 `InputWaitTimeout`。所以调用方不要自己 sleep 或轮询。在 CLI 之外直接调用 C++ 时，要自己用 `get_input_result` 确认结果，不能把排队成功当作已经生效。
 
