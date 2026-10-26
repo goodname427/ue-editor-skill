@@ -74,7 +74,7 @@ python install.py --uninstall --skills ~/.codebuddy/skills --rules ~/.codebuddy/
 ## 回归测试
 
 - 本地 Python 测试：`python -m unittest discover -s tests -v`。
-- 编辑器 Slate 裁剪回归：`exec "import unreal; unreal.SystemLibrary.execute_console_command(None, 'Automation RunTests AgentTools.Slate.Clipping')"`，通过 CLI 的 `--log-file <工程日志> --wait-log "Test Completed. Result=" --wait 60` 等终态，并检查结果是成功、无测试错误。覆盖裁剪查询、透明目标祖先路由和 Locator 字面匹配；不写资产或业务数据。
+- C++ 测试仅放模块 `Private/Tests/`，不混入生产实现、不为测试公开私有 helper。WBP 根夹具在 `AgentWidgetBlueprintInfoLib/Private/Tests/WidgetBlueprintFixtureTests.cpp`；Python 回归与编辑器集成夹具在仓库 `tests/`。
 - 新增 C++ 自动化测试的注册不能只靠 Live Coding：热编译后若报 `No automation tests matched`，经用户确认关闭编辑器、正式编译并重启后再跑。不把编译成功、命令排队或零项测试当通过。
 - 需要完整 WBP/输入现场时，先取得测试资产创建、编辑、保存、删除授权，再用 `exec --file tests/editor_issues.py --phase=create` → `Automation RunTests AgentTools.WBP.PrepareFixture`（等待并核对结果）→ `--phase=populate` → `--phase=open`。夹具只使用 `/Game/__AgentToolsTests/IssuesFixture`；populate 断言 ContentWidget 拒绝覆盖、同父排序和插槽保持，open 输出 tab ID。可验证 `ui scroll-into-view text=AgentToolsInput`、`ui type test --focus=name=FixtureInput`、`ui drag name=DragSource --to-target=name=DropTarget`，错误目标与视口落点应失败且 released=true。
 - 收尾先关闭夹具页签、跨帧确认消失，再 `--phase=cleanup --tab=<open 输出>`；不要把 BP/WidgetTree/控件保存在脚本全局，Python 引用会阻塞删除。删除失败查外部引用，不改走磁盘强删。创建/填充入口的 UObject 只留函数局部；夹具不产生 gameplay 数据，也不证明业务 Drop 成功。

@@ -20,11 +20,6 @@
 #include "MovieScenePossessable.h"
 #include "WidgetBlueprint.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
-#include "Components/CanvasPanel.h"
-#include "Misc/AutomationTest.h"
-#endif
-
 // ==================== 公共辅助 ====================
 
 static FString WBPFail(const FString& Message)
@@ -54,27 +49,6 @@ static UWidgetBlueprint* WBPLoad(const FString& AssetPath, FString& OutError)
 	}
 	return WidgetBP;
 }
-
-#if WITH_DEV_AUTOMATION_TESTS
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FWBPPrepareFixtureTest, "AgentTools.WBP.PrepareFixture", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FWBPPrepareFixtureTest::RunTest(const FString& Parameters)
-{
-	FString Error;
-	UWidgetBlueprint* Blueprint = WBPLoad(TEXT("/Game/__AgentToolsTests/IssuesFixture"), Error);
-	if (!TestNotNull(TEXT("Explicitly created test fixture exists"), Blueprint))
-	{
-		return false;
-	}
-	if (Blueprint->WidgetTree->RootWidget)
-	{
-		return TestTrue(TEXT("Fixture root is a canvas"), Blueprint->WidgetTree->RootWidget->IsA<UCanvasPanel>());
-	}
-	Blueprint->WidgetTree->RootWidget = Blueprint->WidgetTree->ConstructWidget<UCanvasPanel>(UCanvasPanel::StaticClass(), TEXT("FixtureCanvas"));
-	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
-	return TestNotNull(TEXT("Fixture root was created"), Blueprint->WidgetTree->RootWidget.Get());
-}
-#endif
 
 static UWidget* WBPFindWidget(UWidgetBlueprint* WidgetBP, const FString& WidgetName, FString& OutError)
 {

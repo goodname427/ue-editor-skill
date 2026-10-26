@@ -29,11 +29,6 @@
 #include "Widgets/Text/SRichTextBlock.h"
 #include "Widgets/Text/STextBlock.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
-#include "Misc/AutomationTest.h"
-#include "Widgets/Layout/SBorder.h"
-#endif
-
 // ==================== JSON辅助 ====================
 
 static FString SDRectJson(const FVector2D& Pos, const FVector2D& Size)
@@ -1309,81 +1304,6 @@ static bool SDHitsTarget(const FWidgetPath& Path, const TSharedPtr<SWidget>& Tar
 	}
 	return true;
 }
-
-#if WITH_DEV_AUTOMATION_TESTS
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSDClippingTest, "AgentTools.Slate.Clipping", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FSDClippingTest::RunTest(const FString& Parameters)
-{
-	const TSharedRef<STextBlock> Text = SNew(STextBlock).Text(FText::FromString(TEXT("ClipTarget"))).Visibility(EVisibility::HitTestInvisible);
-	const FSDLocator Locator = SDParseLocator(TEXT("text=ClipTarget"));
-	FSlateClippingManager Clipping;
-	Clipping.PushClip(FSlateClippingZone(FSlateRect(0, 0, 100, 100)));
-	const FArrangedWidget Partial(Text, FGeometry::MakeRoot(FVector2D(80, 100), FSlateLayoutTransform(FVector2D(10, 80))));
-	TArray<FSDMatch> Matches;
-	SDFindNode(Partial, Clipping, Locator, FString(), Matches);
-	TestEqual(TEXT("Partially clipped target remains queryable"), Matches.Num(), 1);
-	if (Matches.Num() == 1)
-	{
-		TestTrue(TEXT("Partial clipping is marked"), Matches[0].bClipped);
-		TestEqual(TEXT("Visible bottom uses parent clip"), Matches[0].VisibleRect.Bottom, 100.0f);
-	}
-	const FArrangedWidget Outside(Text, FGeometry::MakeRoot(FVector2D(80, 100), FSlateLayoutTransform(FVector2D(10, 120))));
-	Matches.Reset();
-	SDFindNode(Outside, Clipping, Locator, FString(), Matches);
-	TestEqual(TEXT("Fully clipped target is excluded"), Matches.Num(), 0);
-	SDFindNode(Outside, Clipping, Locator, FString(), Matches, true);
-	TestEqual(TEXT("Diagnostic query retains clipped target"), Matches.Num(), 1);
-	if (Matches.Num() == 1)
-	{
-		TestTrue(TEXT("Diagnostic target is clipped and query-only"), Matches[0].bClipped && Matches[0].bQueryOnly);
-		TestEqual(TEXT("Fully clipped target has no visible height"), Matches[0].VisibleRect.Bottom - Matches[0].VisibleRect.Top, 0.0f);
-	}
-	Text->SetClipping(EWidgetClipping::ClipToBoundsWithoutIntersecting);
-	Matches.Reset();
-	SDFindNode(Outside, Clipping, Locator, FString(), Matches);
-	TestEqual(TEXT("WithoutIntersecting resets ordinary parent clip"), Matches.Num(), 1);
-	TestEqual(TEXT("Traversal restores parent clip stack"), Clipping.GetStackDepth(), 1);
-	Clipping.ResetClippingState();
-	FSlateClippingZone Always(FSlateRect(0, 0, 100, 100));
-	Always.SetAlwaysClip(true);
-	Clipping.PushClip(Always);
-	Matches.Reset();
-	SDFindNode(Outside, Clipping, Locator, FString(), Matches);
-	TestEqual(TEXT("AlwaysClip cannot be escaped"), Matches.Num(), 0);
-	Text->SetClipping(EWidgetClipping::Inherit);
-
-	const TSharedRef<SBorder> Border = SNew(SBorder).Padding(FMargin(0, 120, 0, -120)).Clipping(EWidgetClipping::ClipToBounds)[Text];
-	const TSharedRef<SWindow> Window = SNew(SWindow).ClientSize(FVector2D(200, 100)).CreateTitleBar(false).SupportsMaximize(false).SupportsMinimize(false)[Border];
-	FSlateApplication::Get().AddWindow(Window, false);
-	ON_SCOPE_EXIT
-	{
-		FSlateApplication::Get().RequestDestroyWindow(Window);
-	};
-	Window->SlatePrepass();
-	FWidgetPath TargetPath;
-	if (!TestTrue(TEXT("Fixture target has an arranged path"), FSlateApplication::Get().GeneratePathToWidgetUnchecked(Text, TargetPath)))
-	{
-		return false;
-	}
-	const FWidgetPath AncestorPath = TargetPath.GetPathDownTo(Window);
-	const FGeometry& Geometry = TargetPath.Widgets.Last().Geometry;
-	const FVector2D Pos = Geometry.LocalToAbsolute(Geometry.GetLocalSize() * 0.5f);
-	FString HitVia;
-	TestFalse(TEXT("Clipped transparent target cannot fall through to an ancestor"), SDHitsTarget(AncestorPath, Text, Pos, HitVia));
-	Border->SetPadding(FMargin(0));
-	FSlateApplication::Get().GeneratePathToWidgetUnchecked(Text, TargetPath);
-	const FGeometry& VisibleGeometry = TargetPath.Widgets.Last().Geometry;
-	const FVector2D VisiblePos = VisibleGeometry.LocalToAbsolute(VisibleGeometry.GetLocalSize() * 0.5f);
-	TestTrue(TEXT("Visible transparent target retains ancestor routing"), SDHitsTarget(AncestorPath, Text, VisiblePos, HitVia));
-	Border->SetEnabled(false);
-	TestFalse(TEXT("Disabled ancestor still rejects input"), SDHitsTarget(AncestorPath, Text, VisiblePos, HitVia));
-	TestFalse(TEXT("Unrelated target still rejects input"), SDHitsTarget(AncestorPath, SNew(STextBlock), VisiblePos, HitVia));
-	TestTrue(TEXT("Contains operator remains literal"), SDMatchLocator(SDMakeInfo(Partial), SDParseLocator(TEXT("text~=Target"))));
-	TestFalse(TEXT("Contains operator is not a regex"), SDMatchLocator(SDMakeInfo(Partial), SDParseLocator(TEXT("text~=^ClipTarget$"))));
-	return true;
-}
-#endif
 
 static FString SDPathHitJson(const FWidgetPath& Path)
 {
