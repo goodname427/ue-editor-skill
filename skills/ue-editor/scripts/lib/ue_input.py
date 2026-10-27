@@ -94,8 +94,26 @@ def describe(n, prefix=''):
 def match(locator, window='', index=0):
     matches = find(locator, window)
     if not 0 <= index < len(matches):
-        raise RuntimeError('no widget at index %d (%d matched): %s' % (index, len(matches), locator))
+        listed = ''.join('\n  [%d] %s' % (i, describe(n)) for i, n in enumerate(matches[:5]))
+        raise RuntimeError('no widget at index %d (%d matched): %s%s' % (index, len(matches), locator, listed))
     return matches[index]
+
+
+def in_row(nodes, anchor_locator, window=''):
+    """nodes 中垂直中心落在锚点纵向范围内的 (原下标, 节点)；锚点须唯一可见。"""
+    anchors = find(anchor_locator, window)
+    if len(anchors) != 1:
+        raise RuntimeError('row anchor must match exactly one widget (%d matched): %s' % (len(anchors), anchor_locator))
+    _, top, _, height = anchors[0].get('visible_rect', anchors[0]['rect'])
+    return [(i, n) for i, n in enumerate(nodes) if top <= center(n)[1] <= top + height]
+
+
+def row_index(locator, anchor_locator, window='', index=0):
+    """locator 在锚点同一行的第 index 个命中 → 它在 locator 全部命中里的下标，可直接交给各输入接口。"""
+    rows = in_row(find(locator, window), anchor_locator, window)
+    if not 0 <= index < len(rows):
+        raise RuntimeError('no widget at row index %d (%d in row of %s): %s' % (index, len(rows), anchor_locator, locator))
+    return rows[index][0]
 
 
 def center(node):
@@ -488,6 +506,14 @@ def input_text(locator, text, window='', index=0, replace=True, commit=False):
     wait(0, 2)
     check('__import__("ue_input").check_text(%r, %r, %d, %r)' % (locator, window, index, expected))
     return r
+
+
+def check_typed(request_id):
+    """type_chars 落地：执行时焦点是输入框且每个字符都被处理，否则判失败。"""
+    r = json.loads(LIB.get_input_result(request_id))
+    focus = r.get('focus') or {}
+    ok = r.get('success', False) and focus.get('type') in EDITABLE_TYPES and r.get('handled') == r.get('chars')
+    return json.dumps(dict(r, ok=ok, message='' if ok else 'Typed characters did not reach an editable text widget'), ensure_ascii=False)
 
 
 def check_text(locator, window, index, expected):

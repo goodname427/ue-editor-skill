@@ -103,11 +103,11 @@ class ScreenshotTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.args = SimpleNamespace(out=str(Path(self.directory.name) / 'capture.png'), archive=None,
                                     name=None, margin=8, rect='-90,30,50,40', widget=None, crop=None,
-                                    pie=False, popup=False, instance=None, list=False, title=None, max_width=0)
+                                    pie=False, popup=False, instance=None, list=False, title=None, max_width=0, wait_stable=0)
         self.window = {'hwnd': 1, 'title': 'Editor', 'rect': [-100, 20, 100, 80]}
         self.screenshot = mock.Mock()
         self.screenshot.window_at.return_value = self.window
-        self.screenshot.capture.side_effect = lambda hwnd, path, crop, max_width: {
+        self.screenshot.capture.side_effect = lambda hwnd, path, crop, max_width, stable: {
             'path': path, 'rect': [self.window['rect'][0] + (crop[0] if crop else 0),
                                    self.window['rect'][1] + (crop[1] if crop else 0),
                                    *(crop[2:] if crop else self.window['rect'][2:])],
@@ -125,7 +125,7 @@ class ScreenshotTests(unittest.TestCase):
 
     def test_margin_in_desktop_pixels(self):
         result = self.run_capture()
-        self.screenshot.capture.assert_called_once_with(1, self.args.out, crop=[2, 2, 66, 56], max_width=0)
+        self.screenshot.capture.assert_called_once_with(1, self.args.out, crop=[2, 2, 66, 56], max_width=0, stable=0)
         self.assertEqual(result['rect'], [-98, 22, 66, 56])
 
     def test_margin_clips_to_original_window(self):
@@ -162,7 +162,7 @@ class ScreenshotTests(unittest.TestCase):
 
     def test_invalid_margin_and_ignored_crop_rejected(self):
         for updates in ({'margin': -1}, {'rect': None}, {'crop': '0,0,5,5'},
-                        {'rect': None, 'pie': True, 'margin': 0, 'crop': '0,0,5,5'}):
+                        {'rect': None, 'pie': True, 'margin': 0, 'crop': '0,0,5,5'}, {'wait_stable': 31}):
             with self.subTest(updates=updates):
                 original = vars(self.args).copy()
                 for key, value in updates.items():
@@ -170,6 +170,34 @@ class ScreenshotTests(unittest.TestCase):
                 self.assertEqual(self.run_capture()['error_type'], 'ScreenshotArguments')
                 self.args = SimpleNamespace(**original)
         self.screenshot.capture.assert_not_called()
+
+
+class StableCaptureTests(unittest.TestCase):
+    def capture(self, colors, stable):
+        import ue_screenshot
+        from PIL import Image
+        frames = [((0, 0), Image.new('RGB', (40, 20), color)) for color in colors]
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(ue_screenshot, '_grab', side_effect=frames) as grab, \
+                mock.patch.object(ue_screenshot.win32gui, 'IsIconic', return_value=False), \
+                mock.patch.object(ue_screenshot.time, 'sleep'):
+            result = ue_screenshot.capture(1, str(Path(directory) / 'shot.png'), max_width=0, stable=stable)
+        return result, grab.call_count
+
+    def test_waits_until_adjacent_frames_match(self):
+        result, grabs = self.capture([(0, 0, 0), (200, 200, 200), (200, 200, 200)], 5)
+        self.assertTrue(result['stable'])
+        self.assertEqual(grabs, 3)
+
+    def test_timeout_keeps_last_frame_and_reports_unstable(self):
+        result, grabs = self.capture([(0, 0, 0), (200, 200, 200)], 1e-9)
+        self.assertFalse(result['stable'])
+        self.assertEqual(grabs, 2)
+
+    def test_disabled_grabs_once_without_stability_fields(self):
+        result, grabs = self.capture([(0, 0, 0)], 0)
+        self.assertNotIn('stable', result)
+        self.assertEqual(grabs, 1)
 
 
 class WaitTests(unittest.TestCase):

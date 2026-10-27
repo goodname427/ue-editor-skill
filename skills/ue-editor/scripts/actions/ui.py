@@ -4,11 +4,11 @@
 
   exec --action ui windows                                         列出可见窗口
   exec --action ui tree [根Locator] [--index=N] [--depth=N] [--window=标题] [--full] [--hidden] [--max=N]
-  exec --action ui find <Locator> [--window=标题] [--hidden] [--root=<Locator>] [--no-suggest]  无命中时诊断隐藏/裁剪或给只读候选
+  exec --action ui find <Locator> [--window=标题] [--hidden] [--root=<Locator>] [--no-suggest] [--in-row-of=<Locator>]  无命中时诊断隐藏/裁剪或给只读候选
   exec --action ui at <x,y>                                        坐标处最上层控件
   exec --action ui at --from-image=<PNG> --point=x,y                保存图片局部像素→桌面命中；同样支持 click/mousedown/move/scroll/drag 起点
   exec --action ui focus                                           当前键盘焦点
-  exec --action ui click <Locator> [--index=N] [--right] [--double] [--hold=秒] [--expect-hit=<Locator>] [--no-check]    或 --at=x,y
+  exec --action ui click <Locator> [--index=N] [--in-row-of=<Locator>] [--right] [--double] [--hold=秒] [--expect-hit=<Locator>] [--no-check]    或 --at=x,y
   exec --action ui type <文本> [--focus=<Locator>] [--index=N] [--enter] [--append]
   exec --action ui key <键名> [--ctrl] [--shift] [--alt] [--hold=秒] [--focus=<Locator>] [--index=N]    键名如 Escape / Enter / F5 / A
   exec --action ui scroll <Locator> [--index=N] [--delta=-3] [--frames=8]        或 --at=x,y；delta 正数向上
@@ -34,9 +34,12 @@
 - tree 默认精简：只列有文字/提示/Tag、可点击/可聚焦的控件和 UserWidget 边界，按钮的唯一文字子节点并入按钮行；
   看纯布局/图片控件用 --full，或直接 find name=控件名。
 - 输入文本前用 --focus 直接把焦点设到输入框（如 --focus="hint~=Search"），比先点击再输入可靠。
+  设焦点后焦点没落到目标（被业务逻辑抢走等）直接失败；不带 --focus 的 type 在字符没进输入框时也判失败，回包带 app_active。
 - 带 --focus 的 type 是原子替换：全选旧内容 → 输入 → 加 --enter 时提交 → 回读，实际值不一致直接判失败；
   数字/搜索框把新值追加到旧值后面（1→1100000）时不会再静默成功。只在提交时同步业务的框必须加 --enter；
   被业务上下限截断时 actual 是截断后的值。保留旧内容用 --append。
+- --in-row-of=<锚点Locator>：只取垂直中心落在锚点（须唯一）纵向范围内的命中，--index 变成行内序号；
+  find 列出行内命中及其全集下标，click/mousedown/move/scroll/drag 的目标与 type/key 的 --focus 都可用。只认横向同一行。
 - click 默认校验目标/子节点；透明目标可命中实际祖先，回包带 hit_via。相邻条目、遮挡或禁用仍失败。
   列表/页签可直接按文字 Locator 点；坐标点击取条目容器中心并加 --expect-hit，内层文字 rect 不保证可点。
 - move 完成后保持悬停 10 秒，继续 move 续期；ui release、最后一个鼠标键抬起、排队输入失败或到期恢复原开关。
@@ -109,7 +112,7 @@ def print_target(node):
 
 
 cmd = ARGS[0] if ARGS else ''
-for key in ('index', 'depth', 'max', 'delta', 'at', 'from_image', 'point', 'window', 'focus', 'expect_hit', 'hold', 'max_hold', 'frames', 'to', 'to_target', 'to_index', 'drop_target', 'ancestor', 'root', 'device'):
+for key in ('index', 'depth', 'max', 'delta', 'at', 'from_image', 'point', 'window', 'focus', 'expect_hit', 'hold', 'max_hold', 'frames', 'to', 'to_target', 'to_index', 'drop_target', 'ancestor', 'root', 'device', 'in_row_of'):
     if OPTS.get(key) is True:
         raise RuntimeError('--%s needs a value; use --%s=<value>, not --%s <value>' % (key, key, key))
 if 'from_image' in OPTS or 'point' in OPTS:
@@ -119,6 +122,12 @@ if 'from_image' in OPTS or 'point' in OPTS:
         raise RuntimeError('--from-image is only supported for pointer operations')
 window = OPTS.get('window', '')
 index = int(OPTS.get('index', 0))
+row_of = OPTS.get('in_row_of')
+if row_of and cmd != 'find':
+    row_target = OPTS.get('focus') if cmd in ('type', 'key') else ARGS[1] if len(ARGS) > 1 else None
+    if cmd not in ('click', 'mousedown', 'move', 'scroll', 'drag', 'type', 'key') or not row_target:
+        raise RuntimeError('--in-row-of needs a target Locator: find/click/mousedown/move/scroll/drag <Locator>, or type/key --focus=<Locator>')
+    index = ue_input.row_index(row_target, row_of, window, index)
 mods = (bool(OPTS.get('ctrl')), bool(OPTS.get('shift')), bool(OPTS.get('alt')))
 max_hold = float(OPTS.get('max_hold', ue_input.MAX_HOLD))
 
@@ -149,7 +158,12 @@ elif cmd == 'find':
     if len(ARGS) < 2:
         raise RuntimeError(__doc__)
     matches = parse(lib.find_widgets(ARGS[1], window, True) if OPTS.get('hidden') else lib.find_widgets(ARGS[1], window))
-    print('\n'.join('[%d] %s  (%s)' % (i, line(n), n['window'] or 'untitled popup') for i, n in enumerate(matches)) or '(no match)')
+    if row_of and OPTS.get('hidden'):
+        raise RuntimeError('--in-row-of uses visible geometry; do not combine it with --hidden')
+    rows = ue_input.in_row(matches, row_of, window) if row_of else list(enumerate(matches))
+    print('\n'.join('[%d] %s  (%s)' % (i, line(n), n['window'] or 'untitled popup') for i, n in rows) or '(no match)')
+    if row_of:
+        print('[row filter] [N] is the index in the full match set; --index=N alone, or keep --in-row-of with --index=<position in row>')
     if OPTS.get('hidden'):
         print('[query only] hidden-result indices/geometry cannot be reused for click or screenshot')
     if not matches and not OPTS.get('no_suggest'):
@@ -200,6 +214,7 @@ elif cmd == 'type':
         r = ue_input.type_chars(ARGS[1])
         if OPTS.get('enter'):
             ue_input.key('Enter')
+        ue_input.check('__import__("ue_input").check_typed(%d)' % r['request_id'])
         print('queued: type %r%s; focus before input: %s' % (ARGS[1], ' -> Enter' if OPTS.get('enter') else '', line(r['focus'])))
 
 elif cmd == 'key':

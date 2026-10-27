@@ -1444,7 +1444,13 @@ FString UAgentSlateDriverFunctionLib::FocusWidget(const FString& Locator, const 
 			SDSetInputResult(Id, false, TEXT("Widget was destroyed before focus"));
 			return ESDStep::Failed;
 		}
-		FSlateApplication::Get().SetKeyboardFocus(Target, EFocusCause::SetDirectly);
+		FSlateApplication& SlateApp = FSlateApplication::Get();
+		SlateApp.SetKeyboardFocus(Target, EFocusCause::SetDirectly);
+		if (SlateApp.GetKeyboardFocusedWidget() != Target)
+		{
+			SDSetInputResult(Id, false, TEXT("Keyboard focus did not move to the target"), {AgentJson::PairRaw(TEXT("focus"), SDDescribeFocus()), AgentJson::PairBool(TEXT("app_active"), SlateApp.IsActive())});
+			return ESDStep::Failed;
+		}
 		return ESDStep::Done;
 	});
 	return SDQueued(RequestId, ExtraFields);
@@ -1461,7 +1467,7 @@ FString UAgentSlateDriverFunctionLib::SelectAllText()
 		const TSharedPtr<SWidget> Focused = FSlateApplication::Get().GetKeyboardFocusedWidget();
 		if (!Focused.IsValid() || !SDIsEditableText(Focused.ToSharedRef()))
 		{
-			SDSetInputResult(Id, false, TEXT("Keyboard focus is not an editable text widget"), {AgentJson::PairRaw(TEXT("focus"), SDDescribeFocus())});
+			SDSetInputResult(Id, false, TEXT("Keyboard focus is not an editable text widget"), {AgentJson::PairRaw(TEXT("focus"), SDDescribeFocus()), AgentJson::PairBool(TEXT("app_active"), FSlateApplication::Get().IsActive())});
 			return ESDStep::Failed;
 		}
 		SDSelectAllText(Focused.ToSharedRef());
@@ -1480,11 +1486,13 @@ FString UAgentSlateDriverFunctionLib::TypeText(const FString& Text)
 	{
 		FSlateApplication& SlateApp = FSlateApplication::Get();
 		const uint32 UserIndex = static_cast<uint32>(SlateApp.GetUserIndexForKeyboard());
+		int32 Handled = 0;
 		for (const TCHAR Character : Text)
 		{
-			SlateApp.ProcessKeyCharEvent(FCharacterEvent(Character, FModifierKeysState(), UserIndex, false));
+			Handled += SlateApp.ProcessKeyCharEvent(FCharacterEvent(Character, FModifierKeysState(), UserIndex, false)) ? 1 : 0;
 		}
-		SDSetInputResult(Id, true, FString(), {AgentJson::PairRaw(TEXT("focus"), SDDescribeFocus())});
+		SDSetInputResult(Id, true, FString(), {AgentJson::PairRaw(TEXT("focus"), SDDescribeFocus()), AgentJson::PairInt(TEXT("handled"), Handled),
+			AgentJson::PairInt(TEXT("chars"), Text.Len()), AgentJson::PairBool(TEXT("app_active"), SlateApp.IsActive())});
 		return ESDStep::Done;
 	});
 	return SDQueued(RequestId, {AgentJson::PairRaw(TEXT("focus"), SDDescribeFocus())});

@@ -4,11 +4,12 @@ UE 编辑器窗口截图。在 Agent 侧通过 Win32 PrintWindow 抓取，不进
 """
 
 import ctypes
+import time
 
 import win32gui
 import win32process
 import win32ui
-from PIL import Image
+from PIL import Image, ImageChops, ImageStat
 
 # 取物理像素，避免高 DPI 下窗口尺寸被缩放
 ctypes.windll.user32.SetProcessDPIAware()
@@ -75,10 +76,7 @@ def find_window(title=None):
     return None
 
 
-def capture(hwnd, out_path, crop=None, max_width=1600):
-    """抓取窗口并保存 PNG。crop 为原始像素下的 (x, y, w, h)；max_width<=0 时不缩放。"""
-    if win32gui.IsIconic(hwnd):
-        raise RuntimeError('窗口已最小化，无法截图，请先还原窗口。')
+def _grab(hwnd, crop):
     l, t, r, b = win32gui.GetWindowRect(hwnd)
     width, height = r - l, b - t
 
@@ -102,10 +100,37 @@ def capture(hwnd, out_path, crop=None, max_width=1600):
     if crop:
         x, y, w, h = crop
         img = img.crop((x, y, x + w, y + h))
+    return (l, t), img
+
+
+def _difference(a, b):
+    """缩到 160 宽灰度后的平均像素差（0~255）；淡入/加载约 5 以上，静止画面的雾气、时钟约 0.2~0.4。"""
+    size = (160, max(1, round(a.height * 160 / a.width)))
+    return ImageStat.Stat(ImageChops.difference(a.convert('L').resize(size), b.convert('L').resize(size))).mean[0]
+
+
+def capture(hwnd, out_path, crop=None, max_width=1600, stable=0.0):
+    """抓取窗口并保存 PNG。crop 为原始像素下的 (x, y, w, h)；max_width<=0 时不缩放。
+    stable>0 时每 0.2 秒重抓，相邻两帧差值低于 1 才落盘，最多等 stable 秒；超时仍保存最后一帧并标 stable=false。"""
+    if win32gui.IsIconic(hwnd):
+        raise RuntimeError('窗口已最小化，无法截图，请先还原窗口。')
+    (l, t), img = _grab(hwnd, crop)
+    extra = {}
+    if stable > 0:
+        begin = time.monotonic()
+        diff = None
+        while True:
+            time.sleep(0.2)
+            (l, t), current = _grab(hwnd, crop)
+            diff = _difference(img, current) if current.size == img.size else 255.0
+            img = current
+            if diff < 1.0 or time.monotonic() - begin >= stable:
+                break
+        extra = {'stable': diff < 1.0, 'waited': round(time.monotonic() - begin, 2), 'last_diff': round(diff, 2)}
     origin_size = list(img.size)
     if max_width and max_width > 0 and img.width > max_width:
         img = img.resize((max_width, round(img.height * max_width / img.width)), Image.LANCZOS)
     img.save(out_path)
     x, y = crop[:2] if crop else (0, 0)
-    return {'path': out_path, 'rect': [l + x, t + y, *origin_size],
-            'origin_size': origin_size, 'saved_size': list(img.size)}
+    return dict({'path': out_path, 'rect': [l + x, t + y, *origin_size],
+                 'origin_size': origin_size, 'saved_size': list(img.size)}, **extra)

@@ -39,7 +39,8 @@ UI 操作每一步都要"操作 → 等一帧 → 观察"，比脚本贵得多�
 - **页面切换后重新定位**：导航、弹窗、列表刷新或返回上层后，重新 `ui find`；`--index` 是当次匹配结果的下标，不是稳定 ID，不能跨页面沿用。优先用稳定名称/Tag 或文字与类型组合；重名时先查看当前页面根子树确认目标。`--window` 不是 UMG 页面作用域，当前不显示的导航先返回对应层级再找。
 - **条目内层按钮**：标题或整行不一定可点击。点击返回成功但没有业务效果时，先 `ui tree "name=<条目名>" --depth=5` 找带 `@click` 的内层按钮；核对输出中的 target、match_count 与 topmost hit。命中视口或别的控件时，不算目标按钮已生效，也不能仅靠换下标重试。
 - **命中断言**：`ui click "name=Btn_Apply" --expect-hit="name=Btn_Apply"` 预期 locator 须唯一匹配当前可见控件；排队时保留控件身份，实际执行及悬停更新后按命中/捕获路径检查，允许合法子节点。失败不继续发送按下；CLI 自动跨帧读取请求结果并失败退出，支持与 `--wait-until` / `--wait-log` 组合。`clicks_sent=0` 为未发按下，双击可能第二次失败时为 1，不能重放整次动作。断言是发送前几何路径检查，不证明处理器或业务响应成功；预处理器同步改树/捕获仍可能改变最终路由，业务效果仍用日志/状态确认。
-- **输入文字**：用 `--focus` 直接设焦点再输入，例如 `ui type WBP_Foo --focus="hint~=Search" --enter`。编辑器不在前台时先点击再输入可能拿不到焦点。带 `--focus` 的 `ui type` 原子替换（全选 → 输入 → 加 `--enter` 时提交 → 回读），实际值与请求值不符时命令失败；要往已有内容后追加用 `--append`。只在提交时同步业务值的输入框（数量框常见）必须加 `--enter`，否则框里显示新值、业务仍是旧值。提交后业务把值截到上下限时回读也会不符，`actual` 就是截断后的值，不是输入丢字。
+- **输入文字**：用 `--focus` 直接设焦点再输入，例如 `ui type WBP_Foo --focus="hint~=Search" --enter`。后台（编辑器不在前台）也能聚焦和输入；聚焦后焦点没落到目标（如业务逻辑在下一帧把焦点改走）时 focus 步骤或全选步骤直接失败，回包带当前 `focus` 与 `app_active`，按现场重查后重试，不要靠先点击再输入绕过。不带 `--focus` 的 `ui type` 在字符没进输入框（焦点不是输入框或字符未被处理）时也判失败。带 `--focus` 的 `ui type` 原子替换（全选 → 输入 → 加 `--enter` 时提交 → 回读），实际值与请求值不符时命令失败；要往已有内容后追加用 `--append`。只在提交时同步业务值的输入框（数量框常见）必须加 `--enter`，否则框里显示新值、业务仍是旧值。提交后业务把值截到上下限时回读也会不符，`actual` 就是截断后的值，不是输入丢字。
+- **同一行的控件**：`--in-row-of=<锚点Locator>` 只取垂直中心落在锚点纵向范围内的命中，`--index` 变为行内序号，例如 `ui click "name=Btn_Next" --in-row-of="text=V-Sync"`。锚点须唯一可见；`ui find ... --in-row-of=` 列出行内命中及其全集下标。只认横向同一行，标题在上、按钮在下的两行条目仍要按容器结构定位。`--index` 越界时报错会列出该 Locator 自己的前 5 个命中。
 - **点击前校验**：`ui click` 默认断言最上层命中是目标或其子节点；目标为 `HitTestInvisible` / `SelfHitTestInvisible` 时，也允许命中它的实际祖先，但要求目标当前几何仍包含落点、路径可见且可用，结果附真实容器 `hit_via`。命中相邻条目、遮挡层或禁用目标仍失败。列表/页签优先直接用文字 Locator 点；确实需坐标点击时先找条目/按钮容器 rect 而非内层 TextBlock rect，并加 `--expect-hit=<目标Locator>`，不要靠 `--no-check` 绕过点错邻居。回读页面状态/日志才算业务生效。
 - **悬停保持**：`ui move` 不移动真实鼠标，每次移动完成后保持注入的悬停 10 秒；继续 move 会续期，`ui release`、最后一个鼠标键抬起、排队输入失败或到期会结束。保持期间临时抑制 Slate 自动光标移动，结束恢复原开关值，不永久关闭。真实鼠标输入仍可能改变命中。`hover` 只是命中节点的 Slate `IsHovered`，不代表业务 Tips 已出现；用已确认的浮窗 Locator/内容作等待条件，随后查询或截图。先移出再移入可重新触发 Enter；重复同点 move 只续期，不保证再次触发 Enter。原生 Slate ToolTip 还有真实光标/前台等条件，不能据此宣称所有浮窗都可后台触发。
 - **滚动回读**：`ui scroll` 返回 `handled` / `moved`。`handled` 是整条事件路径有没有控件处理滚轮，不一定是滚动容器本身；`moved=false` 表示光标下内容没移动（已到边界、容器 `ConsumeMouseWheel=Never` 不响应滚轮，或被外围面板接管）。`handled=true` 且 `moved=false` 时，先读容器的 `consume_mouse_wheel` 与 `get_scroll_offset()` 再下结论。queued 成功不代表滚动生效。容器不吃滚轮时改用 `ui drag` 拖动内容。
@@ -76,8 +77,12 @@ python scripts/ue_cli.py screenshot --list
 python scripts/ue_cli.py screenshot --pie --name=feature-view --archive=.codebuddy/temp/evidence
 python scripts/ue_cli.py screenshot --pie --list
 python scripts/ue_cli.py screenshot --pie --instance=1 --name=feature-view --archive=.codebuddy/temp/evidence
+
+# 刚切页/打开界面：等画面稳定（相邻两帧几乎不变）再保存，最多等 5 秒
+python scripts/ue_cli.py screenshot --pie --wait-stable=5 --name=feature-view --archive=.codebuddy/temp/evidence
 ```
 
+- **画面稳定**：控件树出现不等于画面画完，入场动画（淡入、位移）和异步加载期间截到的是半透明或空白画面。`--wait-stable=秒` 每 0.2 秒重抓，相邻两帧平均灰度差低于 1（0~255）才保存，结果带 `stable` / `waited` / `last_diff`；超时仍保存最后一帧并标 `stable=false`，此时画面可能仍在变化（持续动画、粒子），不能当作已就绪。只证明画面不再变化，不证明内容正确。
 - `--pie` 按 WorldContext 关联真实游戏视口，结果附 world/instance，不误取编辑器 SViewport；只覆盖本编辑器进程，未排布/最小化时不可截，多个匹配不猜首项。`--instance` 使用列表中的真实编号，不是列表下标。
 - `--name` + `--archive` 直接保存到证据目录，文件名自动追加时间戳与细分时间，重复截图不覆盖；不复制第二份。`--out` 保留精确路径，不能同时配 `--name` 或 `--archive`。`--pie` / `--widget` / `--rect` / `--popup` 为互斥截图目标；`--pie` 只截整视口，局部 PIE 用 `--widget` / `--rect` 的桌面坐标，不拿缩放后的整屏图当裁剪坐标。`--crop` 只用于窗口内原始坐标，不与 `--pie` / `--widget` / `--rect` 混用。
 - **局部留边**：`screenshot --widget="name=Panel" --margin=8 --max-width=0`，或 `--rect=x,y,w,h --margin=8`。`--margin` 为非负桌面像素，四边扩展后裁回原窗口，不改变选窗中心；只对 `--widget` / `--rect` 生效。结果 `rect` 是实际捕获的桌面区域，`origin_size` / `saved_size` 分别是缩放前后大小。浮窗阴影、标题靠边时建议留 8 像素，再按实际截图确认。

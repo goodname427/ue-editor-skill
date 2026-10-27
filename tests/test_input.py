@@ -345,6 +345,33 @@ class AnalogTests(unittest.TestCase):
         self.assertIn('mapping lost', result['message'])
         self.assertFalse(self.callbacks)
 
+    def test_typed_check_requires_editable_focus_and_all_chars_handled(self):
+        cases = ((True, {'type': 'SEditableText'}, 2, True), (True, {'type': 'SLevelEditor'}, 0, False),
+                 (True, {'type': 'SEditableText'}, 1, False), (False, {'type': 'SEditableText'}, 2, False))
+        for success, focus, handled, ok in cases:
+            with self.subTest(focus=focus['type'], handled=handled, success=success):
+                self.lib.get_input_result.return_value = json.dumps({'success': success, 'pending': False, 'focus': focus,
+                                                                     'handled': handled, 'chars': 2})
+                self.assertEqual(json.loads(self.input.check_typed(7))['ok'], ok)
+
+    def test_row_index_maps_row_position_to_full_match_index(self):
+        def node(name, y):
+            return {'type': 'SButton', 'name': name, 'rect': [0, y, 10, 10]}
+        matches = {'name=Btn': [node('a', 0), node('b', 100), node('c', 101)], 'text=Row': [node('row', 98)]}
+        self.lib.find_widgets.side_effect = lambda locator, window: json.dumps(matches[locator])
+        self.assertEqual(self.input.row_index('name=Btn', 'text=Row'), 1)
+        self.assertEqual(self.input.row_index('name=Btn', 'text=Row', index=1), 2)
+        with self.assertRaisesRegex(RuntimeError, 'row index 2'):
+            self.input.row_index('name=Btn', 'text=Row', index=2)
+        matches['text=Row'].append(node('row2', 0))
+        with self.assertRaisesRegex(RuntimeError, 'exactly one'):
+            self.input.row_index('name=Btn', 'text=Row')
+
+    def test_index_error_lists_the_locator_match_set(self):
+        self.lib.find_widgets.return_value = json.dumps([{'type': 'SButton', 'name': 'Only', 'rect': [1, 2, 3, 4]}])
+        with self.assertRaisesRegex(RuntimeError, r'\[0\] Only<SButton>'):
+            self.input.match('name=Only', index=3)
+
 
 class InputCheckTests(unittest.TestCase):
     def response(self, state):

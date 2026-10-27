@@ -551,6 +551,8 @@ def cmd_screenshot(args):
             raise ValueError('--margin 必须非负，且仅与 --rect / --widget 使用。')
         if args.crop and (args.pie or args.rect or args.widget):
             raise ValueError('--crop 是窗口内原始坐标，仅用于窗口截图；局部 PIE 用 --widget / --rect。')
+        if not 0 <= args.wait_stable <= 30:
+            raise ValueError('--wait-stable 取 0~30 秒。')
     except ValueError as e:
         _print_json({'status': 'error', 'error_type': 'ScreenshotArguments', 'message': str(e)})
         sys.exit(1)
@@ -618,7 +620,7 @@ def cmd_screenshot(args):
         sys.exit(1)
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     try:
-        res = ue_screenshot.capture(win['hwnd'], out, crop=crop, max_width=args.max_width)
+        res = ue_screenshot.capture(win['hwnd'], out, crop=crop, max_width=args.max_width, stable=args.wait_stable)
     except Exception as e:
         _print_json({'status': 'error', 'error_type': 'CaptureFailed', 'message': str(e)})
         return
@@ -727,6 +729,7 @@ def main():
     p_ss.add_argument('--crop', default=None, help='裁剪区域 x,y,w,h（相对窗口的原始像素，不与 --pie / --rect / --widget 使用）')
     p_ss.add_argument('--margin', type=int, default=0, help='--rect / --widget 四边留白的桌面像素，超出窗口自动裁回 (默认 0)')
     p_ss.add_argument('--max-width', type=int, default=1600, help='保存前缩放到的最大宽度，0 为不缩放 (默认 1600)')
+    p_ss.add_argument('--wait-stable', type=float, default=0, help='最多等这么多秒，直到相邻两帧画面不再变化才保存（淡入、异步加载）；超时仍保存并标 stable=false')
 
     # 参数解析与命令分派
     args, extra = parser.parse_known_args()

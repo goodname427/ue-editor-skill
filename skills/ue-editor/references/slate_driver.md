@@ -25,7 +25,7 @@
 - **节点字段**：`type`（Slate 类型）、`name`、`class`、`tag`、`text`、`hint`（输入框提示文字）、`rect`；文本超过摘要长度时另带 `text_full`，`read_text` 优先读完整值。标准富文本的 text 是源字符串（含标签），精确匹配源文或用字面包含；图片、自绘文字或装饰器最终显示文案不自动转换为文本。已知独立多行编辑控件的 text/hint 可读取。状态字段只在非默认时出现：`vis`、`enabled: false`、`interactable`、`focus`、`hover`
 - **输入执行时机**：键鼠/聚焦步骤排到下一帧，CLI 会回读执行结果，目标响应再用 `--wait-until` 确认。`analog_input` 是同步单事件，不排时间线；配对与持续采样由 `ue_input` 在 Python Slate 回调里组合。
 - 驱动不主动定位系统光标，但事件回包可能请求移动、捕获或锁定光标，不能保证不影响用户鼠标。
-- **焦点**：编辑器窗口不在前台时，点击可能拿不到键盘焦点（实测出现过：点击返回成功，文字却打进了关卡视口）。输入文本或按键前，用 `focus_widget` 直接把焦点设到目标上，不要依赖点击。
+- **焦点**：输入文本或按键前，用 `focus_widget` 直接把焦点设到目标上，不要依赖点击（后台时点击不保证把焦点交给输入框）。后台可以聚焦和输入；聚焦后焦点被业务逻辑改走时，focus / 全选步骤会失败并带当前焦点。
 
 ### ListWindows
 
@@ -96,9 +96,9 @@ C++ 只提供下表这些原子步骤，**点击、长按、按键、拖动、�
 
 | 原子步骤 | 作用 | 结果字段 |
 |---|---|---|
-| `focus_widget(locator, window, index)` | 把键盘焦点设到命中的控件；它本身不接受焦点时，取其中第一个可编辑控件。不经过点击路由 | — |
-| `select_all_text()` | 全选当前焦点所在输入框的文字；焦点不是输入框时失败 | — |
-| `type_text(text)` | 向当前焦点逐字发送字符事件（可含中文）；只追加，不清空 | `focus` |
+| `focus_widget(locator, window, index)` | 把键盘焦点设到命中的控件；它本身不接受焦点时，取其中第一个可编辑控件。不经过点击路由；执行后焦点不是目标（目标已隐藏、被模态窗拦截等）时失败 | 失败时 `focus`, `app_active` |
+| `select_all_text()` | 全选当前焦点所在输入框的文字；焦点不是输入框时失败 | 失败时 `focus`, `app_active` |
+| `type_text(text)` | 向当前焦点逐字发送字符事件（可含中文）；只追加，不清空。本身不判失败，落地由调用方按回包判断 | `focus`, `handled`（被处理的字符数）, `chars`, `app_active` |
 | `key_down(key, ctrl, shift, alt, max_hold=30)` | 数字键按下并保持；普通退格额外发字符码 8；模拟轴不可用此接口 | `handled`, `device_id`, `platform_user`, `slate_user` |
 | `analog_input(key, value, device_id=-1)` | **同步单事件**，调用 `OnControllerAnalog`；只接 gamepad Axis1D，-1 取默认映射；不配对、不保持、不自动归零 | `handled`, `device_id`, `platform_user`, `slate_user` |
 | `key_up(key)` | 抬起 `key_down` 按住的键；没按住时失败 | — |
@@ -132,7 +132,7 @@ C++ 只提供下表这些原子步骤，**点击、长按、按键、拖动、�
 | `scroll(x, y, delta, frames=8)` | 排队前先用 `widget_at` 记下落点控件 → `mouse_wheel` → `wait_input(0, frames)` → 回读：落点控件的 `type` / `name` / `rect` 变了才算 `moved` |
 | `input_text(locator, text, window, index, replace=True, commit=False)` | `focus_widget` → `select_all_text`（replace 时）→ `type_text` →（commit 时）`key('Enter')` → `wait_input(0, 2)` → 回读文字，不等于预期就失败。追加模式的预期值是旧值加新文字。控件已消失时记为 `(target destroyed)`，视为通过 |
 
-模块还提供查询辅助：`find`、`find_one`、`match`、`center`、`widget_at`、`read_text`、`describe`（控件节点摘要，`ui` 的输出就用它），以及 `parse`（解析 JSON，`success=false` 时抛异常）。`describe` 已转义 CR/LF、文本引号、反斜杠与 U+0085 / U+2028 / U+2029 行分隔符。诊断查询用 `find(locator, window='', include_hidden=True)`；结果只用于诊断或滚入准备，点击前须重查默认可见集合。
+模块还提供查询辅助：`find`、`find_one`、`match`、`center`、`widget_at`、`read_text`、`describe`（控件节点摘要，`ui` 的输出就用它），以及 `parse`（解析 JSON，`success=false` 时抛异常）。`describe` 已转义 CR/LF、文本引号、反斜杠与 U+0085 / U+2028 / U+2029 行分隔符。诊断查询用 `find(locator, window='', include_hidden=True)`；结果只用于诊断或滚入准备，点击前须重查默认可见集合。`match` 越界时错误里列出该 Locator 的前 5 个命中。同一行定位：`in_row(nodes, anchor_locator)` 返回垂直中心落在唯一锚点纵向范围内的 `(全集下标, 节点)`；`row_index(locator, anchor_locator, window, index)` 把行内序号换成全集下标，可直接交给各原子接口的 `index`。直接用 `type_chars` 时，用 `check('__import__("ue_input").check_typed(<request_id>)')` 确认字符进了输入框。
 
 **与 CLI 的约定**：每个原子步骤打印一行 `[input-request] <id> [秒]`；需要回读的组合再打印一行 `[input-check] <表达式>`，这个表达式必须返回含 `ok` 字段的 JSON 字符串。`exec` / `sequence` 执行完脚本后，按输出顺序等每个请求完成；某个检查表达式会在它之前的请求都完成后才求值。任一步失败时报 `InputAssertionFailed`，等待超时报 `InputWaitTimeout`。所以调用方不要自己 sleep 或轮询。在 CLI 之外直接调用 C++ 时，要自己用 `get_input_result` 确认结果，不能把排队成功当作已经生效。
 
