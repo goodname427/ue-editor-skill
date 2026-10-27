@@ -14,17 +14,19 @@
 
 ## 控制开销
 
-UI 操作每一步都要"操作 → 等一帧 → 观察"，比脚本贵得多。按下面的顺序选：
+控制 Agent 重新推理/调用的次数，比只缩短一个原子动作更重要。需要跨帧，不等于每帧都交回 Agent；按下一次必须重新决策的边界组织调用：
 
 1. **能用脚本做的不走 UI**：查资产用 AssetRegistry、改蓝图用 WBP 编辑接口、启停 PIE 用 `exec --action pie`。UI 操作只用于确认效果，或没有 API 的操作。
-2. **定位用 `find`，不用 `tree`**：`find` 只返回命中的几行；`tree` 用来第一次摸清陌生界面，并且要带根 Locator 和 `--depth`。整窗 `tree` 有数百行，上万 token。
+2. **定位用 `find`，不用 `tree`**：`find` 只返回命中的几行；`tree` 用来第一次摸清陌生界面，默认最多120节点，并尽量带根 Locator 和 `--depth`。截断后先缩小范围，确需更多才显式增大 `--max`。
 3. **操作和确认放在同一次调用**：给操作加 `--wait-until`，等期望的控件出现或消失，省掉单独的观察调用：
 
    ```bash
    python scripts/ue_cli.py exec --action ui click "text=Window" --wait-until "unreal.AgentSlateDriverFunctionLib.find_widgets('text=Enable Fullscreen','') != '[]'" --wait 5
    ```
 
-   多个互不依赖结果的步骤（如点击、截图、关闭）可以写在同一条 shell 命令里顺序执行。
+   已知且已授权的多段流程优先用现有 `sequence`，每步自己等待条件，失败即停；不要把清单再拆成逐段 `exec`。陌生动作则加 `--observe "<只读表达式>"` 同次取回下一步决策所需的文本/候选/状态；多个查询可放在同一表达式或脚本里。需要视觉时加 `--screenshot=pie`（或 `widget` + `--shot-widget=<Locator>`），可配 `--shot-wait-stable=3` / `--shot-archive=<证据目录>`：输入完成、等待、截图、元数据返回都在同一次调用内，不重连。悬停尤其如此，避免 Agent 下一轮判断时10秒保持已过期。图片仍需读取一次，返回路径不等于看过画面。
+
+   输入失败时默认给原因/检查，`--observe` 可同次给现场；不要只因 `handled=true` 或图片变化就判定业务成功。`--expect-hit` 只是落点校验，不是业务断言。没有已知业务就绪条件时不盲设60秒等待；先做一次有界观察，确认后再建立流程。完整原子回包仅诊断时加 `--verbose`。
 
    **等待条件必须是"操作前不成立、操作后才成立"**。例如输入搜索词后用 `text~=MainMenu` 等结果，会被搜索框自己的文字满足，等于没等；要加类型限定结果项，如 `type=SInlineEditableTextBlock;text~=MainMenu`。CLI 会在执行前预检一次条件，已经成立时输出 `[warning]`。
 

@@ -25,6 +25,8 @@ import time
 import locale
 import argparse
 import re
+import io
+import contextlib
 
 # 将 scripts/ 目录加入 path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -276,11 +278,12 @@ def _wait_until(bridge, result, args):
     r = _poll(bridge, args.wait_until, begin + args.wait)
     if r['status'] == 'ok':
         result['waited'] = round(time.monotonic() - begin, 1)
+        result['condition_met'] = True
         return result
     if r['status'] == 'timeout':
         return {'status': 'error', 'error_type': 'WaitTimeout', 'output': result.get('output', ''),
                 'message': f'{args.wait}s 内 --wait-until 条件仍不成立。', 'command_sent': True}
-    return r
+    return dict(r, output=result.get('output', ''), command_sent=True)
 
 
 def _split_script_args(tokens):
@@ -407,6 +410,7 @@ def _sequence_wait(bridge, step, phase):
 
 def _run_sequence(bridge, steps):
     completed = []
+    had_input = False
     for index, step in enumerate(steps):
         print('[sequence %d/%d] %s' % (index + 1, len(steps), step['name']), file=sys.stderr)
         initial = bridge.execute(step['parameters'])
@@ -419,9 +423,10 @@ def _run_sequence(bridge, steps):
             result = _complete_input(bridge, bridge.execute(step['code'])) if phase == 'execute' else _sequence_wait(bridge, step, phase)
             timings[phase] = round(time.monotonic() - begin, 2)
             if phase == 'execute':
-                output = result.get('output', '')[:8000]
+                output = result.get('output', '')
+                had_input = had_input or '[input-request]' in output
             if result['status'] != 'ok':
-                if result.get('error_type') == 'ExecutionError' and step.get('state'):
+                if result.get('error_type') in ('ExecutionError', 'InputAssertionFailed') and step.get('state') and 'last_state' not in result:
                     state = bridge.evaluate(step['state'])
                     if state['status'] == 'ok':
                         result['last_state'] = str(state.get('result', ''))[:4000]
@@ -431,15 +436,83 @@ def _run_sequence(bridge, steps):
                     result['hint'] = ('条件里用到的函数没有定义。条件只调 lib 模块里的函数（如 ph_market.ready()，'
                                       '模块名会预先绑好不用 import），不要依赖入口脚本里定义的函数')
                 # 前面的步骤可能按住了键/鼠标（如 hold-until），中途失败时放开，不让它一直按着
-                if any('[input-request]' in c['output'] for c in completed) or '[input-request]' in output:
+                if had_input and not result.get('resumable'):
                     released = bridge.evaluate('unreal.AgentSlateDriverFunctionLib.release_all_input() '
                                                'if hasattr(unreal, "AgentSlateDriverFunctionLib") else ""')
                     result['input_released'] = released['status'] == 'ok'
                 return dict(result, step=step['name'], step_index=index, phase=phase,
-                            command_sent=phase != 'wait_before', output=output, completed=completed, timings=timings)
-        completed.append({'step': step['name'], 'output': output, 'waited': result.get('waited', 0), 'timings': timings})
+                            command_sent=result.get('command_sent', phase != 'wait_before'), output=output, completed=completed, timings=timings)
+        completed.append({'step': step['name'], 'output': output, 'waited': result.get('waited', 0), 'timings': timings,
+                          'condition_met': bool(step.get('wait_until'))})
         print('[timings] before=%ss execute=%ss after=%ss' % (timings['wait_before'], timings['execute'], timings['wait_until']), file=sys.stderr)
     return {'status': 'ok', 'completed': completed}
+
+
+def _present_result(result, verbose=False):
+    if verbose:
+        return result
+    result = dict(result)
+    output, states, count = [], [], 0
+    for line in result.get('output', '').splitlines():
+        if line.startswith('[input-request] '):
+            count += 1
+        elif line.startswith('[input checked] '):
+            state = json.loads(line[len('[input checked] '):])
+            state = {k: v for k, v in state.items() if k not in ('success', 'pending')}
+            if state and (not states or state != states[-1]):
+                states.append(state)
+        elif not line.startswith('[input-check] '):
+            output.append(line)
+    verified = result.get('condition_met') and not result.get('wait_note')
+    if count:
+        label = 'completed' if result.get('status', 'ok') == 'ok' else 'requested'
+        detail = 'postcondition holds' if verified else 'routing/checks only, not business success'
+        output.append('[input %s] %d steps; %s' % (label, count, detail))
+    if states and not verified:
+        output.append('[input results] ' + json.dumps(states, ensure_ascii=False))
+    if 'output' in result:
+        result['output'] = '\n'.join(output)
+        if len(result['output']) > 8000:
+            result['output'] = result['output'][:8000]
+            result['output_truncated'] = True
+    if 'completed' in result:
+        result['completed'] = [_present_result(step) for step in result['completed']]
+    return result
+
+
+def _observe_after(bridge, result, args):
+    if result.get('resumable') or result.get('error_type') in ('Timeout', 'InputWaitTimeout', 'CommandError', 'InvalidResponse'):
+        return result
+    if getattr(args, 'observe', None):
+        observed = bridge.evaluate(args.observe)
+        result['observation' if observed['status'] == 'ok' else 'observation_error'] = observed.get('result') if observed['status'] == 'ok' else observed
+        if observed.get('resumable') or observed.get('error_type') in ('CommandError', 'InvalidResponse'):
+            if result['status'] == 'ok':
+                result.update(status='error', error_type='ObservationFailed', message='动作已完成，观察响应未确定；不要重发动作。', command_sent=True)
+            return result
+    if getattr(args, 'screenshot', None):
+        shot_args = argparse.Namespace(**vars(args))
+        shot_args.pie, shot_args.popup = args.screenshot == 'pie', args.screenshot == 'popup'
+        shot_args.widget = args.shot_widget
+        shot_args.rect = shot_args.crop = shot_args.out = shot_args.title = None
+        shot_args.list = False
+        shot_args.margin = 0
+        shot_args.window = ''
+        shot_args.index = 0
+        shot_args.name, shot_args.archive = args.shot_name, args.shot_archive
+        shot_args.instance = args.shot_instance
+        shot_args.max_width, shot_args.wait_stable = args.shot_max_width, args.shot_wait_stable
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            try:
+                cmd_screenshot(shot_args, bridge)
+            except SystemExit:
+                pass
+        shot = json.loads(output.getvalue())
+        result['screenshot' if shot['status'] == 'ok' else 'screenshot_error'] = shot
+    if result['status'] == 'ok' and ('observation_error' in result or 'screenshot_error' in result):
+        result.update(status='error', error_type='ObservationFailed', message='动作已完成，但所请求的观察失败；不要重发动作。', command_sent=True)
+    return result
 
 
 def cmd_sequence(args):
@@ -448,8 +521,8 @@ def cmd_sequence(args):
     except (OSError, ValueError, SyntaxError) as e:
         _print_json({'status': 'error', 'error_type': 'SequenceFileError', 'message': str(e)})
         sys.exit(1)
-    result = _run(args, lambda bridge: _run_sequence(bridge, steps))
-    _print_json(result)
+    result = _run(args, lambda bridge: _observe_after(bridge, _run_sequence(bridge, steps), args))
+    _print_json(_present_result(result, args.verbose))
     if result['status'] != 'ok':
         sys.exit(1)
 
@@ -467,11 +540,20 @@ def cmd_exec(args, tokens):
     positional, options = _split_script_args(tokens)
     # 先注入参数再以 compile 执行源码：报错行号与脚本一致，模块 docstring 仍会写入 __doc__ 供用法提示
     code = PRELUDE + 'ARGS, OPTS = %r, %r\nexec(compile(%r, %r, "exec"))\n' % (positional, options, src, name)
-    result = _run(args, lambda b: _execute_and_wait(b, code, args))
+    result = _run(args, lambda b: _observe_after(b, _execute_and_wait(b, code, args), args))
+    result = _present_result(result, args.verbose)
     # 成功时直接输出脚本 print 的文本（省去 JSON 转义，多行可读）；失败时输出 JSON 并以退出码 1 结束
     if result['status'] != 'ok':
+        if not args.verbose and args.action == 'ui' and result.get('error_type') == 'ExecutionError':
+            match = re.search(r'\n(?:RuntimeError|ValueError): (.*)', result.get('message', ''), re.DOTALL)
+            if match:
+                result['message'] = match.group(1).rstrip()
         _print_json(result)
         sys.exit(1)
+    if 'observation' in result:
+        print('[observation] ' + str(result['observation']))
+    if 'screenshot' in result:
+        print('[screenshot] ' + json.dumps(result['screenshot'], ensure_ascii=False))
     text = (result.get('output') or '').rstrip('\n')
     if text:
         print(text)
@@ -501,10 +583,10 @@ def cmd_log(args):
         sys.exit(1)
 
 
-def _widget_rect(args):
+def _widget_rect(args, bridge=None):
     """在编辑器里按 Locator 查控件，返回第 --index 个命中的桌面矩形；失败返回错误 dict。"""
     expr = 'unreal.AgentSlateDriverFunctionLib.find_widgets(%r, %r)' % (args.widget, args.window or '')
-    r = _run(args, lambda b: b.evaluate(expr))
+    r = bridge.evaluate(expr) if bridge else _run(args, lambda b: b.evaluate(expr))
     if r['status'] != 'ok':
         return r
     try:
@@ -517,8 +599,9 @@ def _widget_rect(args):
     return matches[args.index]['rect']
 
 
-def _pie_viewports(args):
-    r = _run(args, lambda b: b.evaluate('unreal.AgentSlateDriverFunctionLib.list_pie_viewports()'))
+def _pie_viewports(args, bridge=None):
+    expr = 'unreal.AgentSlateDriverFunctionLib.list_pie_viewports()'
+    r = bridge.evaluate(expr) if bridge else _run(args, lambda b: b.evaluate(expr))
     if r['status'] != 'ok':
         return r
     try:
@@ -544,7 +627,7 @@ def _screenshot_out(args):
     return os.path.join(directory, '%s_%s_%09d.png' % (name, time.strftime('%Y%m%d_%H%M%S'), time.time_ns() % 1000000000))
 
 
-def cmd_screenshot(args):
+def cmd_screenshot(args, bridge=None):
     try:
         out = _screenshot_out(args)
         if args.margin < 0 or (args.margin and not (args.rect or args.widget)):
@@ -564,7 +647,7 @@ def cmd_screenshot(args):
         return
     pie = None
     if args.pie:
-        rows = _pie_viewports(args)
+        rows = _pie_viewports(args, bridge)
         if isinstance(rows, dict):
             _print_json(rows)
             sys.exit(1)
@@ -589,7 +672,7 @@ def cmd_screenshot(args):
     # --rect 给的是桌面坐标：选包含该区域的窗口，再换算成窗口内裁剪区域
     rect = pie['rect'] if pie else [int(float(v)) for v in args.rect.split(',')] if args.rect else None
     if args.widget:
-        rect = _widget_rect(args)
+        rect = _widget_rect(args, bridge)
         if isinstance(rect, dict):
             _print_json(rect)
             return
@@ -731,8 +814,34 @@ def main():
     p_ss.add_argument('--max-width', type=int, default=1600, help='保存前缩放到的最大宽度，0 为不缩放 (默认 1600)')
     p_ss.add_argument('--wait-stable', type=float, default=0, help='最多等这么多秒，直到相邻两帧画面不再变化才保存（淡入、异步加载）；超时仍保存并标 stable=false')
 
+    for command in (p_exec, p_sequence):
+        command.add_argument('--verbose', action='store_true', help='保留原始输入步骤回包及完整错误栈')
+        command.add_argument('--observe', default=None, help='动作与等待结束后，同连接求值只读表达式；不代替 wait-until 业务断言')
+        command.add_argument('--screenshot', choices=('pie', 'window', 'popup', 'widget'), default=None, help='动作与等待结束后直接截图，返回路径与元数据')
+        command.add_argument('--shot-widget', default=None, help='--screenshot=widget 的唯一目标 Locator')
+        command.add_argument('--shot-name', default=None, help='后截图语义名')
+        command.add_argument('--shot-archive', default=None, help='后截图证据目录')
+        command.add_argument('--shot-instance', type=int, default=None, help='后截图 PIE 实例编号')
+        command.add_argument('--shot-max-width', type=int, default=1600, help='后截图最大宽度，0 不缩放')
+        command.add_argument('--shot-wait-stable', type=float, default=0, help='后截图等待相邻帧稳定的上限秒数（0~30）')
+
     # 参数解析与命令分派
     args, extra = parser.parse_known_args()
+    if args.subcommand in ('exec', 'sequence'):
+        if args.observe:
+            try:
+                compile(args.observe, '<observe>', 'eval')
+            except SyntaxError as e:
+                parser.error(str(e))
+        if bool(args.shot_widget) != (args.screenshot == 'widget') or not 0 <= args.shot_wait_stable <= 30:
+            parser.error('--screenshot=widget 必须配 --shot-widget；--shot-wait-stable 取 0~30 秒')
+        if args.shot_instance is not None and args.screenshot != 'pie':
+            parser.error('--shot-instance 仅配 --screenshot=pie')
+        if args.screenshot:
+            try:
+                _screenshot_out(argparse.Namespace(out=None, name=args.shot_name, archive=args.shot_archive))
+            except ValueError as e:
+                parser.error(str(e))
     if args.subcommand == 'exec':
         cmd_exec(args, extra)
         return

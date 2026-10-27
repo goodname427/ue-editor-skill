@@ -27,7 +27,9 @@ python scripts/ue_cli.py exec --file do_rename.py --timeout 300             # �
 
 - **脚本参数**：CLI 不认识的参数都传给脚本：`--k=v` 和 `--k`（布尔）进 `OPTS`，其余按顺序进 `ARGS`，四种来源都可用。带值的选项必须写成 `--k=v`（写成 `--k v` 时 `v` 会进 `ARGS`）。
 - **可 import 的模块**：每次执行前 CLI 把 Skill 的 `scripts/lib/` 和工程的 `.codebuddy/ue-editor/lib/`（工程目录在编辑器里求）加进 `sys.path`，并丢掉这两处模块的缓存，所以改完或 `git pull` 后不用重启编辑器。两处 lib 的模块名还会预先绑到编辑器全局，首次用到才导入：`--wait-until "ph_market.ready()"`、内联代码 `exec "print(ue_wbp.info(p))"` 都不用先 `import`。因此 lib 模块不能存跨调用状态。
-- **输出**：成功时直接输出脚本 `print` 的文本（无输出时为 `[ok]`，用了 `--wait-until` 时末尾附 `[waited Ns]`），退出码 0；失败时输出 JSON（`error_type`、`message` 为 traceback 且行号与脚本文件一致、`output` 为报错前已 print 的内容），退出码 1。要拿某个值就 `print` 出来。
+- **输出**：成功时输出脚本 `print` 文本，退出码0；失败时 JSON、退出码1。默认把输入协议标记与重复空成功回包收成完成摘要；明确后置条件已通过时不再展开原子路由，未断言/失败仍保留相关检查。`exec --action ui` 的 RuntimeError/ValueError 只显示原因和候选，其它异常仍带栈。`--verbose` 保留完整原始输入输出与错误栈。精简只影响展示，不改变断言、执行顺序或失败清理。
+- **动作后观察**：`exec` / `sequence` 的 `--observe "<只读表达式>"` 在动作及等待结束后同连接求值，可一次返回多项所需状态，成功与确定的输入/等待失败都可观察；传输响应未定时不追加查询。表达式只读，`False` 只是观察值，不表示失败，业务断言仍用 `--wait-until` / `--wait-log`。观察失败返回 `ObservationFailed`、标明动作已经完成，不能重发动作。
+- **动作后截图**：`--screenshot=pie|window|popup|widget` 复用现有截图实现和连接，`widget` 必须配唯一 `--shot-widget=<Locator>`。可配 `--shot-name` / `--shot-archive` / `--shot-instance`（仅PIE）/ `--shot-max-width` / `--shot-wait-stable`（0~30秒），用前缀避免截走项目脚本参数。返回图片路径、桌面矩形等元数据；CLI 不解释图片，Agent 仍需读取图片。稳定不证明业务正确或资源加载完成；截图失败不会重放动作。未请求观察/截图时不增加这些开销。
 - **编码**：输入按 UTF-8 解码并忽略 BOM，输出统一 UTF-8；超过一行的代码写成 `.py` 用 `--file`，避开 Shell 转义。
 - **源码载荷**：`--file` 读取内容后按源码发送，Bridge 用 `ExecuteStatement` 包装多语句执行；可保留模块 docstring、`.py` 字符串和原始行号，不需要改成注释。旧版 Bridge 使用 `ExecuteFile` 会把源码中某些 `.py` 文本误当文件名。
 - **编辑器内路径**：`unreal.Paths.project_dir()` 可能是相对路径，需要磁盘绝对路径时用 `unreal.Paths.convert_relative_path_to_full(...)`；不要假定它与本地 CLI 工作目录相同。
@@ -50,7 +52,7 @@ python scripts/ue_cli.py exec --file do_rename.py --timeout 300             # �
 | `args` / `options` | 脚本的 `ARGS` 列表 / `OPTS` 对象，默认空。整个值写成 `"{名字}"` 时替换成 `--param 名字=值`，没传就在启动前报错；写成 `"{名字=默认}"` 时没传就用默认值 |
 | `wait_before` | 执行动作前轮询的 Python 表达式；省略即直接执行 |
 | `wait_until` | 动作执行后轮询表达式；省略即不等待 |
-| `state` | 等待超时或执行异常时读取的诊断表达式，可返回世界、当前状态等 |
+| `state` | 等待超时、确定的执行/输入失败时读取的只读诊断表达式；传输响应未定不追加查询 |
 | `wait` | 每个等待阶段最长秒数，默认 60，范围 0~3600 |
 
 脚本相对路径以清单所在目录为准。`--param` 值始终是字符串，只通过占位符传进去，脚本里只读 `ARGS` / `OPTS`：`args` / `options` 里整值写 `"{名字}"`；条件（`wait_before` / `wait_until` / `state`）里整值是占位符时原样替换成表达式（如 `hold-until` 的 `"{until}"`），写在表达式中间时替换成字符串字面量（`"ph_market.num_is({num=1})"` → `ph_market.num_is('3')`）。不做其它字符串插值或命令拼接。没有任何步骤用到的 `--param` 直接报错（防止拼错名字被静默忽略）。每步的 `ARGS` / `OPTS` 在该步等待之前安装。

@@ -31,8 +31,8 @@
 - 坐标为桌面像素 [x,y,w,h]，可原样给 `screenshot --rect=x,y,w,h`（坐标可能为负，参数一律写成 --k=v）。
 - 输入在下一帧执行：本次输出的焦点、状态都是输入执行前的。要在同一次调用里确认效果，加 CLI 的 --wait-until，
   如 click "text=Window" --wait-until "unreal.AgentSlateDriverFunctionLib.find_widgets('text=Enable Fullscreen','') != '[]'"
-- tree 默认精简：只列有文字/提示/Tag、可点击/可聚焦的控件和 UserWidget 边界，按钮的唯一文字子节点并入按钮行；
-  看纯布局/图片控件用 --full，或直接 find name=控件名。
+- tree 默认精简、最多120节点：只列有文字/提示/Tag、可点击/可聚焦的控件和 UserWidget 边界，按钮的唯一文字子节点并入按钮行；
+  截断后缩小根 Locator / --depth，或显式增大 --max。看纯布局/图片控件用 --full，或直接 find name=控件名。
 - 输入文本前用 --focus 直接把焦点设到输入框（如 --focus="hint~=Search"），比先点击再输入可靠。
   设焦点后焦点没落到目标（被业务逻辑抢走等）直接失败；不带 --focus 的 type 在字符没进输入框时也判失败，回包带 app_active。
 - 带 --focus 的 type 是原子替换：全选旧内容 → 输入 → 加 --enter 时提交 → 回读，实际值不一致直接判失败；
@@ -84,7 +84,7 @@ def point(text):
 
 def need_target(what):
     if not ARGS[1:] and not OPTS.get('at') and not OPTS.get('from_image'):
-        raise RuntimeError('%s needs <Locator>, --at=x,y or --from-image=PNG --point=x,y\n\n%s' % (what, __doc__))
+        raise RuntimeError('ui %s needs <Locator>, --at=x,y or --from-image=PNG --point=x,y' % what)
 
 
 def coordinate():
@@ -137,7 +137,7 @@ if cmd == 'windows':
 
 elif cmd == 'tree':
     root = ARGS[1] if len(ARGS) > 1 else ''
-    call = [window, root, int(OPTS.get('depth', 0)), bool(OPTS.get('hidden')), not OPTS.get('full'), int(OPTS.get('max', 3000))]
+    call = [window, root, int(OPTS.get('depth', 0)), bool(OPTS.get('hidden')), not OPTS.get('full'), int(OPTS.get('max', 120))]
     if 'index' in OPTS:
         call.append(index)
     data = parse(lib.dump_slate_tree(*call))
