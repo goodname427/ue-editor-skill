@@ -71,6 +71,30 @@ class ObservationTests(unittest.TestCase):
         self.assertFalse(result['screenshot']['stable'])
         self.assertEqual(result['status'], 'ok')
 
+    def test_ui_selection_failure_is_observation_failure_not_action_replay(self):
+        bridge = mock.Mock()
+        args = self.args(observe_ui=True, ui_scope='pie', ui_window='', ui_root='', ui_instance=None, ui_depth=6, ui_limit=80)
+        args.observe = None
+        for status in ('root_not_found', 'root_ambiguous', 'selection_required', 'no_pie_viewport'):
+            with self.subTest(status=status):
+                bridge.evaluate.return_value = {'status': 'ok', 'result': repr(json.dumps({'kind': 'ui', 'scope': 'pie', 'status': status}))}
+                result = ue_cli._observe_after(bridge, {'status': 'ok'}, args)
+                self.assertEqual(result['error_type'], 'ObservationFailed')
+                self.assertEqual(result['ui_observation']['status'], status)
+                bridge.execute.assert_not_called()
+
+    def test_ui_screenshot_inherits_selected_instance(self):
+        bridge = mock.Mock()
+        bridge.evaluate.return_value = {'status': 'ok', 'result': repr(json.dumps({'kind': 'ui', 'scope': 'pie', 'status': 'observed', 'selected': {'instance': 2}}))}
+        args = self.args(observe_ui=True, ui_scope='pie', ui_window='', ui_root='', ui_instance=2, ui_depth=6, ui_limit=80)
+        args.observe, args.screenshot = None, 'pie'
+        def capture(actual, connection):
+            self.assertEqual(actual.instance, 2)
+            self.assertIs(connection, bridge)
+            print(json.dumps({'status': 'ok', 'path': 'shot.png'}))
+        with mock.patch.object(ue_cli, 'cmd_screenshot', side_effect=capture):
+            self.assertEqual(ue_cli._observe_after(bridge, {'status': 'ok'}, args)['status'], 'ok')
+
     def test_viewports_query_uses_existing_connection(self):
         bridge = mock.Mock()
         bridge.evaluate.return_value = {'status': 'ok', 'result': repr('[{"instance": 1}]')}

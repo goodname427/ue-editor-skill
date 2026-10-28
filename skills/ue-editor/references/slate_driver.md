@@ -21,8 +21,9 @@
   - `type` 是 Slate 类（`SButton`、`SObjectWidget`），`class` 是 UMG 类（`Button`、蓝图类 `WBP_Foo_C`）；树里每行写作 `名称<type:class>`。找 UserWidget 用 `class=BP_Xxx_C`，`type` 一律是 `SObjectWidget`
   - `name` / `class` 只有 UMG 控件才有（取蓝图里的控件名与 UWidget 类名，PIE 界面、WBP 设计器预览都适用）；编辑器原生面板一般靠 `text` / `hint` / `tag` / `type` 定位
 - **window_filter**：只匹配**独立窗口**的标题（主窗口、浮动窗口）。停靠的面板（内容浏览器、细节面板等）都在主窗口里，要用根 Locator 定位，如 `type=SContentBrowser`；同类面板开了多个时用 match index 区分。下拉菜单等弹出层是无标题的独立窗口。
-- **匹配下标**：`match_index` / `--index` 仅对应当次匹配集合，不是控件稳定 ID；页面、导航或列表变化后必须重新查找，不能复用旧下标。
+- **匹配下标**：`match_index` / `--index` 仅对应当次匹配集合，不是控件稳定 ID；页面、导航或列表变化后必须重新查找，不能复用旧下标。`DumpSlateTree`的根下标与同参数`FindWidgets`共用匹配序列，完全裁剪/零尺寸根不会挤占普通可见下标；`root_match_count`是匹配总数，不受子树输出截断影响。
 - **节点字段**：`type`（Slate 类型）、`name`、`class`、`tag`、`text`、`hint`（输入框提示文字）、`rect`；文本超过摘要长度时另带 `text_full`，`read_text` 优先读完整值。标准富文本的 text 是源字符串（含标签），精确匹配源文或用字面包含；图片、自绘文字或装饰器最终显示文案不自动转换为文本。已知独立多行编辑控件的 text/hint 可读取。状态字段只在非默认时出现：`vis`、`enabled: false`、`interactable`、`focus`、`hover`
+- **窗口/PIE归属**：`find_widgets`返回`window_rect`（实际所属SWindow矩形），PIE视口后代额外带`pie_instance`（真实GameViewport祖先），不用同标题或矩形重叠猜归属。新增字段不改UFUNCTION签名，须编译后回读确认。`ue_input.observe_ui(root='', instance=None, window='', depth=6, limit=80, scope='window')`默认通用窗口，`scope='pie'`才按实例筛选，instance仅用于pie；返回可交互Locator及窗口匹配数，不是稳定ref、不保证无遮挡。`ue_input.readiness(locator, window='', index=None, previous=None)`共用只读可见/启用/采样门禁，previous由调用方持有，本lib无跨调用状态；CLI的--ready-timeout负责跨帧等待。
 - **输入执行时机**：键鼠/聚焦步骤排到下一帧，CLI 会回读执行结果，目标响应再用 `--wait-until` 确认。`analog_input` 是同步单事件，不排时间线；配对与持续采样由 `ue_input` 在 Python Slate 回调里组合。
 - 驱动不主动定位系统光标，但事件回包可能请求移动、捕获或锁定光标，不能保证不影响用户鼠标。
 - **焦点**：输入文本或按键前，用 `focus_widget` 直接把焦点设到目标上，不要依赖点击（后台时点击不保证把焦点交给输入框）。后台可以聚焦和输入；聚焦后焦点被业务逻辑改走时，focus / 全选步骤会失败并带当前焦点。

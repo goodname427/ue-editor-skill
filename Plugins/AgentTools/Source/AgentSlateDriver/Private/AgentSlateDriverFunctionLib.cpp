@@ -458,8 +458,8 @@ static FString SDWindowRectJson(const TSharedRef<SWindow>& Window)
 struct FSDDumpContext
 {
 	FSDLocator Root;
-	int32 RootMatchIndex = -1;
 	int32 RootMatchCount = 0;
+	TArray<TSharedPtr<SWidget>> RootWidgets;
 	int32 MaxDepth = 0;
 	bool bIncludeHidden = false;
 	bool bCompact = true;
@@ -494,16 +494,11 @@ static void SDDumpNode(const FArrangedWidget& Arranged, int32 Depth, bool bInRoo
 	const TSharedRef<SWidget>& Widget = Arranged.Widget;
 	const FSDWidgetInfo Info = SDMakeInfo(Arranged);
 	bool bIsRoot = false;
-	if (!bInRoot && SDMatchLocator(Info, Context.Root))
+	if (!bInRoot && Context.RootWidgets.Contains(Widget))
 	{
-		// 根 Locator 命中多个时，RootMatchIndex 只导出其中第 N 个（按遍历顺序）
-		const int32 MatchIndex = Context.RootMatchCount++;
-		if (Context.RootMatchIndex < 0 || MatchIndex == Context.RootMatchIndex)
-		{
-			bInRoot = true;
-			bIsRoot = true;
-			Depth = 0;
-		}
+		bInRoot = true;
+		bIsRoot = true;
+		Depth = 0;
 	}
 	int32 ChildDepth = Depth;
 	if (bInRoot)
@@ -661,7 +656,31 @@ static FString SDMatchJson(const FSDMatch& Match)
 {
 	TArray<FString> Fields;
 	Fields.Add(AgentJson::Pair(TEXT("window"), Match.WindowTitle));
+	if (const TSharedPtr<SWindow> Window = FSlateApplication::Get().FindWidgetWindow(Match.Widget.ToSharedRef()))
+	{
+		Fields.Add(AgentJson::PairRaw(TEXT("window_rect"), SDWindowRectJson(Window.ToSharedRef())));
+	}
 	Fields.Append(SDNodeFields(Match.Info, Match.Widget.ToSharedRef()));
+	if (GEngine)
+	{
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.WorldType != EWorldType::PIE || !Context.GameViewport)
+			{
+				continue;
+			}
+			const TSharedPtr<SViewport> Viewport = Context.GameViewport->GetGameViewportWidget();
+			int32 Guard = 0;
+			for (TSharedPtr<SWidget> Widget = Match.Widget; Viewport.IsValid() && Widget.IsValid() && Guard++ < 256; Widget = Widget->GetParentWidget())
+			{
+				if (Widget.Get() == Viewport.Get())
+				{
+					Fields.Add(AgentJson::PairInt(TEXT("pie_instance"), Context.PIEInstance));
+					break;
+				}
+			}
+		}
+	}
 	if (Match.bClipped)
 	{
 		Fields.Add(AgentJson::PairBool(TEXT("clipped"), true));
@@ -864,12 +883,24 @@ FString UAgentSlateDriverFunctionLib::DumpSlateTree(const FString& WindowFilter,
 	}
 	FSDDumpContext Context;
 	Context.Root = SDParseLocator(RootLocator);
-	Context.RootMatchIndex = RootMatchIndex;
 	Context.MaxDepth = MaxDepth;
 	Context.bIncludeHidden = bIncludeHidden;
 	Context.bCompact = bCompact;
 	Context.MaxNodes = MaxNodes > 0 ? MaxNodes : 3000;
 	const bool bWholeTree = Context.Root.IsEmpty();
+	if (!bWholeTree)
+	{
+		TArray<FSDMatch> Matches;
+		SDFindMatches(Context.Root, WindowFilter, Matches, bIncludeHidden);
+		Context.RootMatchCount = Matches.Num();
+		for (int32 Index = 0; Index < Matches.Num(); ++Index)
+		{
+			if (RootMatchIndex < 0 || Index == RootMatchIndex)
+			{
+				Context.RootWidgets.Add(Matches[Index].Widget);
+			}
+		}
+	}
 
 	TArray<TSharedRef<SWindow>> Windows;
 	SDGetWindows(WindowFilter, Windows);

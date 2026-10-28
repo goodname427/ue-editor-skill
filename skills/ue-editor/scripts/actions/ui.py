@@ -2,6 +2,7 @@
 编辑器界面查看与操作，编辑器面板、弹出菜单与 PIE 界面通用。依赖 AgentTools 的 AgentSlateDriverFunctionLib，Locator 语法见 references/slate_driver.md。
 兜底手段：能用 Python API 脚本完成的操作不要走这里（见 SKILL.md「选择方式」）。
 
+  exec --action ui observe [--scope=window|pie] [--window=标题] [--root=<Locator>] [--instance=N] [--depth=6] [--max=80]    有界结构与目标匹配数；默认窗口，instance仅用于pie
   exec --action ui windows                                         列出可见窗口
   exec --action ui tree [根Locator] [--index=N] [--depth=N] [--window=标题] [--full] [--hidden] [--max=N]
   exec --action ui find <Locator> [--window=标题] [--hidden] [--root=<Locator>] [--no-suggest] [--in-row-of=<Locator>]  无命中时诊断隐藏/裁剪或给只读候选
@@ -112,7 +113,7 @@ def print_target(node):
 
 
 cmd = ARGS[0] if ARGS else ''
-for key in ('index', 'depth', 'max', 'delta', 'at', 'from_image', 'point', 'window', 'focus', 'expect_hit', 'hold', 'max_hold', 'frames', 'to', 'to_target', 'to_index', 'drop_target', 'ancestor', 'root', 'device', 'in_row_of'):
+for key in ('index', 'depth', 'max', 'delta', 'at', 'from_image', 'point', 'window', 'focus', 'expect_hit', 'hold', 'max_hold', 'frames', 'to', 'to_target', 'to_index', 'drop_target', 'ancestor', 'root', 'device', 'in_row_of', 'instance', 'scope'):
     if OPTS.get(key) is True:
         raise RuntimeError('--%s needs a value; use --%s=<value>, not --%s <value>' % (key, key, key))
 if 'from_image' in OPTS or 'point' in OPTS:
@@ -131,7 +132,16 @@ if row_of and cmd != 'find':
 mods = (bool(OPTS.get('ctrl')), bool(OPTS.get('shift')), bool(OPTS.get('alt')))
 max_hold = float(OPTS.get('max_hold', ue_input.MAX_HOLD))
 
-if cmd == 'windows':
+if cmd == 'observe':
+    import json
+    observation = ue_input.observe_ui(OPTS.get('root', ''), int(OPTS['instance']) if 'instance' in OPTS else None,
+                                      window, int(OPTS.get('depth', 6)), int(OPTS.get('max', 80)), OPTS.get('scope', 'window'))
+    print(json.dumps(observation, ensure_ascii=False))
+    if observation['status'] != 'observed':
+        failure = dict(ok=False, message=observation['status'], observation=observation)
+        ue_input.check('__import__("json").dumps(%r)' % failure)
+
+elif cmd == 'windows':
     for w in parse(lib.list_windows()):
         print('%s [%d,%d,%d,%d]%s' % ((w['title'] or '(untitled popup)',) + tuple(w['rect']) + (' active' if w['active'] else '',)))
 

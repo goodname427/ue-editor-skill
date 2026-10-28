@@ -173,6 +173,96 @@ def suggest(locator, window='', root='', limit=5):
     return {'candidates': [node for _, node in candidates[:limit]], 'truncated': data.get('truncated', False)}
 
 
+def observe_ui(root='', instance=None, window='', depth=6, limit=80, scope='window'):
+    """当前窗口或显式PIE范围的有界结构与目标，不返回稳定引用，不推断业务就绪。"""
+    if not 1 <= limit <= 300 or not 1 <= depth <= 20 or scope not in ('window', 'pie'):
+        raise ValueError('observe depth must be in 1..20, limit in 1..300, scope window/pie')
+    if instance is not None and scope != 'pie':
+        raise ValueError('instance requires scope=pie')
+    result = {'kind': 'ui', 'scope': scope, 'captured_at': time.time(), 'selected': None,
+              'nodes': [], 'truncated': False}
+    if scope == 'pie':
+        viewports = parse(LIB.list_pie_viewports())
+        result['viewports'] = viewports
+        selected = [v for v in viewports if (instance is None or v['instance'] == instance)
+                    and (not window or window.casefold() in v['window'].casefold())]
+        if len(selected) != 1:
+            result.update(status='selection_required' if selected else 'no_pie_viewport',
+                          recovery='Select an instance from viewports; PIE running alone does not imply a visible viewport.')
+            return result
+        selected = selected[0]
+        locator = root or 'type=SViewport'
+        matches = find(locator, selected['window'])
+        indices = [i for i, n in enumerate(matches) if n.get('pie_instance') == selected['instance']
+                   and (root or n['rect'] == selected['rect'])]
+    else:
+        windows = parse(LIB.list_windows())
+        result['windows'] = windows
+        selected = [w for w in windows if not window or window.casefold() in w['title'].casefold()]
+        if not window and len(selected) > 1:
+            active = [w for w in selected if w.get('active')]
+            if len(active) == 1:
+                selected = active
+        if len(selected) != 1:
+            result.update(status='selection_required' if selected else 'no_window',
+                          recovery='Use a unique window title; docked panels use a root Locator in that window.')
+            return result
+        selected = dict(selected[0], window=selected[0]['title'])
+        locator = root or 'type=SWindow'
+        matches = find(locator, selected['window'])
+        indices = [i for i, n in enumerate(matches) if n.get('window') == selected['window']
+                   and n.get('window_rect') == selected['rect'] and (root or n['rect'] == selected['rect'])]
+    result['selected'] = selected
+    if len(indices) != 1:
+        result.update(status='root_ambiguous' if indices else 'root_not_found',
+                      candidates=[describe(matches[i]) for i in indices[:5]],
+                      recovery='Use a unique root Locator inside the selected observation scope.')
+        return result
+    data = parse(LIB.dump_slate_tree(selected['window'], locator, depth, False, True, limit, indices[0]))
+    targets = {}
+    for win in data['windows']:
+        for node in win['nodes']:
+            n = {k: node[k] for k in ('d', 'type', 'name', 'class', 'tag', 'text', 'hint', 'label', 'rect',
+                                    'visible_rect', 'enabled', 'interactable', 'focus', 'hover') if k in node}
+            if node.get('interactable'):
+                fields = dict(node, text=node.get('text_full', node.get('text', '')))
+                parts = ['%s=%s' % (k, fields[k]) for k in ('type', 'name', 'class', 'tag', 'text', 'hint', 'label')
+                         if fields.get(k) and ';' not in fields[k] and fields[k] == fields[k].strip()]
+                if parts:
+                    target = ';'.join(parts)
+                    if target not in targets:
+                        targets[target] = len(find(target, selected['window']))
+                    n.update(target=target, target_window=selected['window'], target_match_count=targets[target])
+            result['nodes'].append(n)
+    result.update(status='observed', root=locator, truncated=data.get('truncated', False),
+                  focus=parse(LIB.get_keyboard_focus()), target_lifetime='Re-resolve target before input; no stable refs.',
+                  verification='Structure only; visibility and routing do not prove business success.')
+    if result['truncated']:
+        result['recovery'] = 'Narrow root/depth or raise limit; omitted nodes are not evidence of absence.'
+    return result
+
+
+def readiness(locator, window='', index=None, previous=None):
+    """只读可见/启用/连续采样几何门禁；遮挡及捕获路径仍由 checked input 执行时核实。"""
+    matches = find(locator, window)
+    if not matches:
+        return {'status': 'waiting', 'reason': 'target_not_visible', 'sample': None}
+    if index is None and len(matches) != 1:
+        return {'status': 'refused', 'reason': 'ambiguous_target', 'sample': None,
+                'candidates': [describe(n) for n in matches[:5]]}
+    selected = 0 if index is None else index
+    if not 0 <= selected < len(matches):
+        return {'status': 'refused', 'reason': 'index_out_of_range', 'sample': None}
+    node = matches[selected]
+    if node.get('enabled') is False:
+        return {'status': 'refused', 'reason': 'target_disabled', 'sample': None, 'target': describe(node)}
+    sample = {k: node.get(k) for k in ('window', 'name', 'type', 'class', 'tag', 'text', 'rect', 'visible_rect', 'visible_point')}
+    ready = sample == previous
+    return {'status': 'ready' if ready else 'waiting', 'reason': 'geometry_sampled' if ready else 'geometry_settling',
+            'sample': sample, 'target': describe(node), 'index': selected,
+            'coverage': 'Occlusion/capture checked by checked input at execution, not by this gate.'}
+
+
 def read_text(locator, window='', index=0):
     """命中控件的文字；它不是输入框时取其中第一个输入框（与 FocusWidget 的取法一致）。控件不在时返回 None。"""
     matches = find(locator, window)
@@ -500,7 +590,10 @@ def input_text(locator, text, window='', index=0, replace=True, commit=False):
     r = focus(locator, window, index)
     if replace:
         select_all()
-    type_chars(text)
+    if replace and not text:
+        key('BackSpace')
+    else:
+        type_chars(text)
     if commit:
         key('Enter')
     wait(0, 2)

@@ -24,9 +24,11 @@
    python scripts/ue_cli.py exec --action ui click "text=Window" --wait-until "unreal.AgentSlateDriverFunctionLib.find_widgets('text=Enable Fullscreen','') != '[]'" --wait 5
    ```
 
-   已知且已授权的多段流程优先用现有 `sequence`，每步自己等待条件，失败即停；不要把清单再拆成逐段 `exec`。陌生动作则加 `--observe "<只读表达式>"` 同次取回下一步决策所需的文本/候选/状态；多个查询可放在同一表达式或脚本里。需要视觉时加 `--screenshot=pie`（或 `widget` + `--shot-widget=<Locator>`），可配 `--shot-wait-stable=3` / `--shot-archive=<证据目录>`：输入完成、等待、截图、元数据返回都在同一次调用内，不重连。悬停尤其如此，避免 Agent 下一轮判断时10秒保持已过期。图片仍需读取一次，返回路径不等于看过画面。
+   已知且已授权的多段流程优先用现有 `sequence`，每步自己等待条件，失败即停；不要把清单再拆成逐段 `exec`。陌生界面先 `exec --action ui observe`（默认window，停靠面板用root；PIE显式`--scope=pie`），可用 `--window` / `--root` / `--depth` / `--max` 缩小范围；动作或sequence加 `--observe-ui` 同次返回结构化现场，用 `--ui-window` / `--ui-root` / `--ui-depth` / `--ui-limit` 控制，PIE用`--ui-scope=pie`和可选`--ui-instance`。窗口根按真实SWindow归属筛选，PIE根额外按真实视口祖先链筛选，target_match_count大于1不得把目标当唯一引用，截断不表示未返回节点不存在。业务状态再用 `--observe "<只读表达式>"` 补充；多个查询放在同一表达式或脚本里。需要视觉时加 `--screenshot=pie`（或 `widget` + `--shot-widget=<Locator>`），可配 `--shot-wait-stable=3` / `--shot-archive=<证据目录>`：输入完成、等待、截图、元数据返回都在同一次调用内，不重连。悬停尤其如此，避免 Agent 下一轮判断时10秒保持已过期。图片仍需读取一次，返回路径不等于看过画面。
 
-   输入失败时默认给原因/检查，`--observe` 可同次给现场；不要只因 `handled=true` 或图片变化就判定业务成功。`--expect-hit` 只是落点校验，不是业务断言。没有已知业务就绪条件时不盲设60秒等待；先做一次有界观察，确认后再建立流程。完整原子回包仅诊断时加 `--verbose`。
+   目标晚创建/正在移动时用 `--ready-timeout=3` 在click/move/mousedown的Locator或type的--focus前只读等待，默认关闭；只检查可见/启用及两次几何采样，遮挡仍由checked点击临发前拒绝，不预等待遮挡。歧义/禁用直接拒绝，门禁到期不排队动作，不自动重发；细节见cli.md。
+
+   输入失败时默认给原因/检查，`--observe-ui` / `--observe` 可同次给现场；不要只因 `handled=true` 或图片变化就判定业务成功。`--expect-hit` 只是落点校验，不是业务断言。没有已知业务就绪条件时不盲设60秒等待；先做一次有界观察，确认后再建立流程。完整原子回包仅诊断时加 `--verbose`。
 
    **等待条件必须是"操作前不成立、操作后才成立"**。例如输入搜索词后用 `text~=MainMenu` 等结果，会被搜索框自己的文字满足，等于没等；要加类型限定结果项，如 `type=SInlineEditableTextBlock;text~=MainMenu`。CLI 会在执行前预检一次条件，已经成立时输出 `[warning]`。
 

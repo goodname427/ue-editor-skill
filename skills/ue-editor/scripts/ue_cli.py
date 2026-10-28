@@ -245,8 +245,45 @@ def _complete_input(bridge, result):
     return result
 
 
+def _wait_ready(bridge, target, seconds):
+    begin = time.monotonic()
+    previous = None
+    state = {'status': 'waiting', 'reason': 'readiness_deadline', 'sample': None}
+    while True:
+        if time.monotonic() - begin >= seconds:
+            return {'status': 'error', 'error_type': 'TargetReadyTimeout', 'message': state['reason'],
+                    'readiness': state, 'command_sent': False, 'recovery': 'No action queued. Re-observe before retrying.'}
+        response = bridge.evaluate('__import__("json").dumps(__import__("ue_input").readiness(%r, %r, %r, %r))'
+                                   % (*target, previous))
+        if response['status'] != 'ok':
+            return dict(response, command_sent=False, phase='ready')
+        try:
+            state = json.loads(ast.literal_eval(response['result']))
+            if not isinstance(state, dict) or state.get('status') not in ('ready', 'waiting', 'refused'):
+                raise ValueError('invalid readiness state')
+        except (ValueError, SyntaxError) as e:
+            return {'status': 'error', 'error_type': 'InvalidResponse', 'message': str(e), 'command_sent': False}
+        elapsed = time.monotonic() - begin
+        if state['status'] == 'ready' and elapsed < seconds:
+            return {'status': 'ok', 'readiness': state, 'ready_waited': round(elapsed, 3)}
+        if state['status'] == 'refused' or elapsed >= seconds:
+            return {'status': 'error', 'error_type': 'TargetRefused' if state['status'] == 'refused' else 'TargetReadyTimeout',
+                    'message': state['reason'], 'readiness': state, 'command_sent': False,
+                    'recovery': 'No action queued. Re-observe the target; do not loosen the Locator or click an obstruction automatically.'}
+        previous = state.get('sample')
+        time.sleep(min(0.05, max(0, seconds - (time.monotonic() - begin))))
+
+
 def _execute_and_wait(bridge, code, args):
     """日志验证在执行前取基线；表达式验证先预检，执行后跨帧等待。"""
+    ready = None
+    if getattr(args, 'ready_timeout', 0):
+        setup = bridge.execute(PRELUDE)
+        if setup['status'] != 'ok':
+            return dict(setup, command_sent=False)
+        ready = _wait_ready(bridge, args.ready_target, args.ready_timeout)
+        if ready['status'] != 'ok':
+            return ready
     if getattr(args, 'wait_log', None) is not None:
         if not args.log_file or not args.wait_log or args.wait < 0 or not 1 <= args.log_lines <= 200:
             return {'status': 'error', 'error_type': 'LogArguments',
@@ -262,9 +299,13 @@ def _execute_and_wait(bridge, code, args):
             log.update(output=result.get('output', ''), command_sent=True)
             return log
         result['log'] = log
+        if ready:
+            result.update(readiness=ready['readiness'], ready_waited=ready['ready_waited'])
         return result
     already = bool(args.wait_until) and _condition_true(bridge, args.wait_until)
     result = _wait_until(bridge, _complete_input(bridge, bridge.execute(code)), args)
+    if ready:
+        result.update(readiness=ready['readiness'], ready_waited=ready['ready_waited'])
     if already and result['status'] == 'ok':
         result['wait_note'] = '--wait-until 条件在执行前就已成立，这次等待不能证明操作生效；换一个只在操作后才成立的条件'
     return result
@@ -483,6 +524,29 @@ def _present_result(result, verbose=False):
 def _observe_after(bridge, result, args):
     if result.get('resumable') or result.get('error_type') in ('Timeout', 'InputWaitTimeout', 'CommandError', 'InvalidResponse'):
         return result
+    if getattr(args, 'observe_ui', False):
+        instance = args.ui_instance
+        if args.ui_scope == 'pie' and instance is None and args.screenshot == 'pie':
+            instance = args.shot_instance
+        observed = bridge.evaluate('__import__("json").dumps(__import__("ue_input").observe_ui(%r, %r, %r, %r, %r, %r))'
+                                   % (args.ui_root, instance, args.ui_window, args.ui_depth, args.ui_limit, args.ui_scope))
+        if observed['status'] == 'ok':
+            try:
+                state = json.loads(ast.literal_eval(observed['result']))
+                if not isinstance(state, dict) or state.get('kind') != 'ui' or state.get('scope') != args.ui_scope:
+                    raise ValueError('invalid UI observation scope')
+                result['ui_observation'] = state
+                if state.get('status') != 'observed':
+                    result['observation_error'] = {'status': 'error', 'error_type': 'UIObservationUnavailable',
+                                                   'message': state.get('status'), 'recovery': state.get('recovery')}
+            except (ValueError, SyntaxError) as e:
+                result['observation_error'] = {'status': 'error', 'error_type': 'InvalidResponse', 'message': str(e)}
+        else:
+            result['observation_error'] = observed
+            if observed.get('resumable') or observed.get('error_type') in ('CommandError', 'InvalidResponse'):
+                if result['status'] == 'ok':
+                    result.update(status='error', error_type='ObservationFailed', message='动作已完成，观察响应未确定；不要重发动作。', command_sent=True)
+                return result
     if getattr(args, 'observe', None):
         observed = bridge.evaluate(args.observe)
         result['observation' if observed['status'] == 'ok' else 'observation_error'] = observed.get('result') if observed['status'] == 'ok' else observed
@@ -501,6 +565,13 @@ def _observe_after(bridge, result, args):
         shot_args.index = 0
         shot_args.name, shot_args.archive = args.shot_name, args.shot_archive
         shot_args.instance = args.shot_instance
+        selected = result.get('ui_observation', {}).get('selected')
+        if shot_args.pie and selected and 'instance' in selected and shot_args.instance is None:
+            shot_args.instance = selected['instance']
+        if args.screenshot in ('window', 'widget') and selected:
+            shot_args.window = selected['window']
+            if args.screenshot == 'window':
+                shot_args.rect = ','.join(str(v) for v in selected['rect'])
         shot_args.max_width, shot_args.wait_stable = args.shot_max_width, args.shot_wait_stable
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -538,6 +609,20 @@ def cmd_exec(args, tokens):
     if src is None:
         sys.exit(1)
     positional, options = _split_script_args(tokens)
+    if args.ready_timeout:
+        mode = positional[0] if positional else ''
+        target = options.get('focus') if mode == 'type' else positional[1] if len(positional) > 1 else None
+        if args.action != 'ui' or mode not in ('click', 'move', 'mousedown', 'type') or not isinstance(target, str) or not target or any(k in options for k in ('at', 'from_image', 'in_row_of', 'no_check', 'hidden')):
+            _print_json({'status': 'error', 'error_type': 'ReadyArguments', 'message': '--ready-timeout requires ui click/move/mousedown <Locator> or type --focus=<Locator>, without coordinates/row filter/no-check/hidden.', 'command_sent': False})
+            sys.exit(1)
+        try:
+            index = int(options['index']) if 'index' in options else None
+            if index is not None and index < 0:
+                raise ValueError('index must be nonnegative')
+        except (ValueError, TypeError) as e:
+            _print_json({'status': 'error', 'error_type': 'ReadyArguments', 'message': str(e), 'command_sent': False})
+            sys.exit(1)
+        args.ready_target = (target, options.get('window', ''), index)
     # 先注入参数再以 compile 执行源码：报错行号与脚本一致，模块 docstring 仍会写入 __doc__ 供用法提示
     code = PRELUDE + 'ARGS, OPTS = %r, %r\nexec(compile(%r, %r, "exec"))\n' % (positional, options, src, name)
     result = _run(args, lambda b: _observe_after(b, _execute_and_wait(b, code, args), args))
@@ -550,6 +635,10 @@ def cmd_exec(args, tokens):
                 result['message'] = match.group(1).rstrip()
         _print_json(result)
         sys.exit(1)
+    if 'ready_waited' in result:
+        print('[ready waited %ss] visible/enabled/sampled geometry; coverage checked during input' % result['ready_waited'])
+    if 'ui_observation' in result:
+        print('[ui observation] ' + json.dumps(result['ui_observation'], ensure_ascii=False))
     if 'observation' in result:
         print('[observation] ' + str(result['observation']))
     if 'screenshot' in result:
@@ -814,7 +903,15 @@ def main():
     p_ss.add_argument('--max-width', type=int, default=1600, help='保存前缩放到的最大宽度，0 为不缩放 (默认 1600)')
     p_ss.add_argument('--wait-stable', type=float, default=0, help='最多等这么多秒，直到相邻两帧画面不再变化才保存（淡入、异步加载）；超时仍保存并标 stable=false')
 
+    p_exec.add_argument('--ready-timeout', type=float, default=0, help='ui Locator 动作前只读等待可见/启用/稳定采样，0关闭，最多30秒；不重发动作')
     for command in (p_exec, p_sequence):
+        command.add_argument('--observe-ui', action='store_true', help='动作后同连接返回有界窗口控件结构，无需Python表达式')
+        command.add_argument('--ui-scope', choices=('window', 'pie'), default='window', help='观察范围：默认通用窗口，pie启用实例/视口归属')
+        command.add_argument('--ui-window', default='', help='观察窗口标题子串；停靠面板使用ui-root')
+        command.add_argument('--ui-root', default='', help='观察子树的唯一根Locator')
+        command.add_argument('--ui-instance', type=int, default=None, help='仅ui-scope=pie：观察实例，多视口时必须指定')
+        command.add_argument('--ui-depth', type=int, default=6, help='观察深度，1~20')
+        command.add_argument('--ui-limit', type=int, default=80, help='观察节点上限，1~300')
         command.add_argument('--verbose', action='store_true', help='保留原始输入步骤回包及完整错误栈')
         command.add_argument('--observe', default=None, help='动作与等待结束后，同连接求值只读表达式；不代替 wait-until 业务断言')
         command.add_argument('--screenshot', choices=('pie', 'window', 'popup', 'widget'), default=None, help='动作与等待结束后直接截图，返回路径与元数据')
@@ -828,6 +925,14 @@ def main():
     # 参数解析与命令分派
     args, extra = parser.parse_known_args()
     if args.subcommand in ('exec', 'sequence'):
+        if not 1 <= args.ui_depth <= 20 or not 1 <= args.ui_limit <= 300:
+            parser.error('--ui-depth 取1~20，--ui-limit 取1~300')
+        if args.ui_instance is not None and args.ui_scope != 'pie':
+            parser.error('--ui-instance仅用于--ui-scope=pie')
+        if args.ui_scope == 'pie' and args.ui_instance is not None and args.shot_instance is not None and args.screenshot == 'pie' and args.ui_instance != args.shot_instance:
+            parser.error('PIE观察和截图实例必须一致')
+        if args.subcommand == 'exec' and not 0 <= args.ready_timeout <= 30:
+            parser.error('--ready-timeout 取0~30秒')
         if args.observe:
             try:
                 compile(args.observe, '<observe>', 'eval')
