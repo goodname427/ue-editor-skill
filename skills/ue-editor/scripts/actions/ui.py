@@ -4,6 +4,8 @@
 
   exec --action ui observe [--scope=window|pie] [--window=标题] [--root=<Locator>] [--instance=N] [--depth=6] [--max=80] [--summary]    默认节点树；summary单次扫描最多1000节点后返回边界/目标/文字/重复控件摘要
   exec --action ui text <文字Locator> [--window=标题] [--index=N]       完整回读目标自身文字；默认要求唯一，富文本保留源标记，不取后代文字
+  exec --action ui object <Locator> [--fields=属性1,属性2] [--index=N]   通过源object_path只读反射字段；也可用 --path=<运行时对象路径>
+  exec --action ui list <Locator> [--offset=0] [--limit=10] [--fields=属性1,属性2]  原生逻辑项/生成entry/选中索引与有界采样；也可 --path
   exec --action ui windows                                         列出可见窗口
   exec --action ui tree [根Locator] [--index=N] [--depth=N] [--window=标题] [--full] [--hidden] [--max=N]
   exec --action ui find <Locator> [--window=标题] [--hidden] [--root=<Locator>] [--no-suggest] [--in-row-of=<Locator>]  无命中时诊断隐藏/裁剪或给只读候选
@@ -114,7 +116,7 @@ def print_target(node):
 
 
 cmd = ARGS[0] if ARGS else ''
-for key in ('index', 'depth', 'max', 'delta', 'at', 'from_image', 'point', 'window', 'focus', 'expect_hit', 'hold', 'max_hold', 'frames', 'to', 'to_target', 'to_index', 'drop_target', 'ancestor', 'root', 'device', 'in_row_of', 'instance', 'scope'):
+for key in ('index', 'depth', 'max', 'delta', 'at', 'from_image', 'point', 'window', 'focus', 'expect_hit', 'hold', 'max_hold', 'frames', 'to', 'to_target', 'to_index', 'drop_target', 'ancestor', 'root', 'device', 'in_row_of', 'instance', 'scope', 'path', 'fields', 'offset', 'limit'):
     if OPTS.get(key) is True:
         raise RuntimeError('--%s needs a value; use --%s=<value>, not --%s <value>' % (key, key, key))
 if 'from_image' in OPTS or 'point' in OPTS:
@@ -148,6 +150,19 @@ elif cmd == 'text':
     if len(ARGS) != 2:
         raise RuntimeError('ui text needs one text Locator')
     print(json.dumps(ue_input.text_snapshot(ARGS[1], window, index if 'index' in OPTS else None), ensure_ascii=False))
+
+elif cmd in ('object', 'list'):
+    import json
+    import ue_runtime
+    if len(ARGS) > 2 or (len(ARGS) == 2) == bool(OPTS.get('path')):
+        raise RuntimeError('ui %s requires one widget Locator or --path=<runtime object path>' % cmd)
+    fields = tuple(str(OPTS.get('fields', '')).split(',')) if OPTS.get('fields') else ()
+    kwargs = dict(path=OPTS.get('path', ''), locator=ARGS[1] if len(ARGS) == 2 else '', window=window,
+                  index=index if 'index' in OPTS else None, fields=fields)
+    if cmd == 'list':
+        kwargs.update(offset=int(OPTS.get('offset', 0)), limit=int(OPTS.get('limit', 10)))
+    snapshot = (ue_runtime.list_snapshot if cmd == 'list' else ue_runtime.object_snapshot)(**kwargs)
+    print(json.dumps(snapshot, ensure_ascii=False))
 
 elif cmd == 'windows':
     for w in parse(lib.list_windows()):

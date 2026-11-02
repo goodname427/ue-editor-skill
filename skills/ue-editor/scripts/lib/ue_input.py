@@ -195,7 +195,7 @@ def _observation_summary(nodes, rect, limit):
             stack.pop()
         parent = next((n for n in reversed(stack) if n['type'] == 'SObjectWidget'), None)
         parent_key = _observation_target(parent) if parent else ''
-        brief = {k: node[k] for k in ('d', 'type', 'name', 'class', 'tag', 'text', 'hint', 'label', 'rect',
+        brief = {k: node[k] for k in ('d', 'type', 'name', 'class', 'object_path', 'tag', 'text', 'hint', 'label', 'rect',
                                      'visible_rect', 'enabled', 'interactable') if k in node}
         brief['locator'] = _observation_target(node)
         if node['type'] == 'SObjectWidget':
@@ -285,7 +285,7 @@ def observe_ui(root='', instance=None, window='', depth=6, limit=80, scope='wind
         targets = {}
         for win in data['windows']:
             for node in win['nodes']:
-                n = {k: node[k] for k in ('d', 'type', 'name', 'class', 'tag', 'text', 'hint', 'label', 'rect',
+                n = {k: node[k] for k in ('d', 'type', 'name', 'class', 'object_path', 'tag', 'text', 'hint', 'label', 'rect',
                                         'visible_rect', 'enabled', 'interactable', 'focus', 'hover') if k in node}
                 if node.get('interactable'):
                     target = _observation_target(node)

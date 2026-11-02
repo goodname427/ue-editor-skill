@@ -520,7 +520,7 @@ def _present_result(result, verbose=False):
                     structured = json.loads(line)
                 except ValueError:
                     structured = None
-                if isinstance(structured, dict) and structured.get('kind') in ('ui', 'text'):
+                if isinstance(structured, dict) and structured.get('kind') in ('ui', 'text', 'object', 'list'):
                     kept.append(line)
                 elif remaining > 0:
                     kept.append(line[:remaining])

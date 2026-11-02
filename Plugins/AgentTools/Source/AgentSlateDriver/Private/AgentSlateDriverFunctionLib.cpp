@@ -61,6 +61,7 @@ struct FSDWidgetInfo
 	FString Type;
 	FString Name;
 	FString Class;
+	FString ObjectPath;
 	FString Tag;
 	FString Text;
 	FString Hint;
@@ -229,6 +230,10 @@ static FSDWidgetInfo SDMakeInfo(const FArrangedWidget& Arranged)
 	if (const TSharedPtr<FReflectionMetaData> MetaData = Widget->GetMetaData<FReflectionMetaData>())
 	{
 		Info.Name = MetaData->Name.ToString();
+		if (const UObject* SourceObject = MetaData->SourceObject.Get())
+		{
+			Info.ObjectPath = SourceObject->GetPathName();
+		}
 		if (const UClass* WidgetClass = MetaData->Class.Get())
 		{
 			Info.Class = WidgetClass->GetName();
@@ -276,6 +281,10 @@ static TArray<FString> SDNodeFields(const FSDWidgetInfo& Info, const TSharedRef<
 	if (!Info.Class.IsEmpty())
 	{
 		Fields.Add(AgentJson::Pair(TEXT("class"), Info.Class));
+	}
+	if (!Info.ObjectPath.IsEmpty())
+	{
+		Fields.Add(AgentJson::Pair(TEXT("object_path"), Info.ObjectPath));
 	}
 	if (!Info.Tag.IsEmpty())
 	{
