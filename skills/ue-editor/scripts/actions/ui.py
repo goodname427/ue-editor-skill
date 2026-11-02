@@ -2,7 +2,8 @@
 编辑器界面查看与操作，编辑器面板、弹出菜单与 PIE 界面通用。依赖 AgentTools 的 AgentSlateDriverFunctionLib，Locator 语法见 references/slate_driver.md。
 兜底手段：能用 Python API 脚本完成的操作不要走这里（见 SKILL.md「选择方式」）。
 
-  exec --action ui observe [--scope=window|pie] [--window=标题] [--root=<Locator>] [--instance=N] [--depth=6] [--max=80]    有界结构与目标匹配数；默认窗口，instance仅用于pie
+  exec --action ui observe [--scope=window|pie] [--window=标题] [--root=<Locator>] [--instance=N] [--depth=6] [--max=80] [--summary]    默认节点树；summary单次扫描最多1000节点后返回边界/目标/文字/重复控件摘要
+  exec --action ui text <文字Locator> [--window=标题] [--index=N]       完整回读目标自身文字；默认要求唯一，富文本保留源标记，不取后代文字
   exec --action ui windows                                         列出可见窗口
   exec --action ui tree [根Locator] [--index=N] [--depth=N] [--window=标题] [--full] [--hidden] [--max=N]
   exec --action ui find <Locator> [--window=标题] [--hidden] [--root=<Locator>] [--no-suggest] [--in-row-of=<Locator>]  无命中时诊断隐藏/裁剪或给只读候选
@@ -135,11 +136,18 @@ max_hold = float(OPTS.get('max_hold', ue_input.MAX_HOLD))
 if cmd == 'observe':
     import json
     observation = ue_input.observe_ui(OPTS.get('root', ''), int(OPTS['instance']) if 'instance' in OPTS else None,
-                                      window, int(OPTS.get('depth', 6)), int(OPTS.get('max', 80)), OPTS.get('scope', 'window'))
+                                      window, int(OPTS.get('depth', 6)), int(OPTS.get('max', 80)), OPTS.get('scope', 'window'),
+                                      **({'summary': True} if OPTS.get('summary') else {}))
     print(json.dumps(observation, ensure_ascii=False))
     if observation['status'] != 'observed':
         failure = dict(ok=False, message=observation['status'], observation=observation)
         ue_input.check('__import__("json").dumps(%r)' % failure)
+
+elif cmd == 'text':
+    import json
+    if len(ARGS) != 2:
+        raise RuntimeError('ui text needs one text Locator')
+    print(json.dumps(ue_input.text_snapshot(ARGS[1], window, index if 'index' in OPTS else None), ensure_ascii=False))
 
 elif cmd == 'windows':
     for w in parse(lib.list_windows()):

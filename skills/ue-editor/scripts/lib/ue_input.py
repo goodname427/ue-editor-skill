@@ -173,7 +173,63 @@ def suggest(locator, window='', root='', limit=5):
     return {'candidates': [node for _, node in candidates[:limit]], 'truncated': data.get('truncated', False)}
 
 
-def observe_ui(root='', instance=None, window='', depth=6, limit=80, scope='window'):
+def _observation_target(node):
+    fields = dict(node, text=node.get('text_full', node.get('text', '')))
+    return ';'.join('%s=%s' % (k, fields[k]) for k in ('type', 'name', 'class', 'tag', 'text', 'hint', 'label')
+                    if isinstance(fields.get(k), str) and fields[k] and len(fields[k]) <= 80
+                    and ';' not in fields[k] and fields[k] == fields[k].strip())
+
+
+def _observation_summary(nodes, rect, limit):
+    stack, roots, groups, controls, texts = [], [], {}, {}, {}
+    excluded = 0
+    for node in nodes:
+        x, y, w, h = node.get('visible_rect', node['rect'])
+        if (node.get('query_only') or node.get('visible_path') is False or node.get('geometry_valid') is False
+                or min(w, h) <= 0 or x >= rect[0] + rect[2] or y >= rect[1] + rect[3]
+                or x + w <= rect[0] or y + h <= rect[1]):
+            excluded += 1
+            continue
+        depth = node.get('d', 0)
+        while stack and stack[-1].get('d', 0) >= depth:
+            stack.pop()
+        parent = next((n for n in reversed(stack) if n['type'] == 'SObjectWidget'), None)
+        parent_key = _observation_target(parent) if parent else ''
+        brief = {k: node[k] for k in ('d', 'type', 'name', 'class', 'tag', 'text', 'hint', 'label', 'rect',
+                                     'visible_rect', 'enabled', 'interactable') if k in node}
+        brief['locator'] = _observation_target(node)
+        if node['type'] == 'SObjectWidget':
+            if depth <= 3:
+                roots.append(dict(brief, parent=parent_key))
+            key = (parent_key, node.get('class', ''))
+            if key not in groups:
+                groups[key] = dict(brief, parent=parent_key, observed_count=0, examples=[])
+            group = groups[key]
+            group['observed_count'] += 1
+            if len(group['examples']) < 3:
+                group['examples'].append(node.get('name', ''))
+        if node.get('interactable'):
+            key = (brief['locator'], node.get('text_full', node.get('text', '')), node.get('hint'), node.get('label'))
+            if key not in controls:
+                controls[key] = dict(brief, parent=parent_key, observed_count=0)
+            controls[key]['observed_count'] += 1
+        if node.get('text'):
+            texts.setdefault((parent_key, node.get('name'), node.get('text_full', node['text'])), dict(brief, parent=parent_key))
+        stack.append(node)
+    roots.sort(key=lambda n: n.get('d', 0))
+    targets = sorted(controls.values(), key=lambda n: (n.get('observed_count', 0) != 1,
+                                                     not bool(n.get('text') or n.get('label') or n.get('hint'))))
+    repeated = sorted((g for g in groups.values() if g['observed_count'] > 1),
+                      key=lambda n: -n['observed_count'])
+    values = {'widget_roots': roots, 'targets': targets, 'texts': list(texts.values()), 'repeated_widgets': repeated}
+    caps = {'widget_roots': 20, 'targets': 25, 'texts': 20, 'repeated_widgets': 10}
+    return dict({k: v[:min(limit, caps[k])] for k, v in values.items()},
+                output_truncated={k: len(v) > min(limit, caps[k]) for k, v in values.items()},
+                scanned_nodes=len(nodes), excluded_nodes=excluded,
+                coverage='Observed Slate nodes within scan/depth bounds; counts are not logical list items or pool size.')
+
+
+def observe_ui(root='', instance=None, window='', depth=6, limit=80, scope='window', summary=False):
     """当前窗口或显式PIE范围的有界结构与目标，不返回稳定引用，不推断业务就绪。"""
     if not 1 <= limit <= 300 or not 1 <= depth <= 20 or scope not in ('window', 'pie'):
         raise ValueError('observe depth must be in 1..20, limit in 1..300, scope window/pie')
@@ -218,26 +274,34 @@ def observe_ui(root='', instance=None, window='', depth=6, limit=80, scope='wind
                       candidates=[describe(matches[i]) for i in indices[:5]],
                       recovery='Use a unique root Locator inside the selected observation scope.')
         return result
-    data = parse(LIB.dump_slate_tree(selected['window'], locator, depth, False, True, limit, indices[0]))
-    targets = {}
-    for win in data['windows']:
-        for node in win['nodes']:
-            n = {k: node[k] for k in ('d', 'type', 'name', 'class', 'tag', 'text', 'hint', 'label', 'rect',
-                                    'visible_rect', 'enabled', 'interactable', 'focus', 'hover') if k in node}
-            if node.get('interactable'):
-                fields = dict(node, text=node.get('text_full', node.get('text', '')))
-                parts = ['%s=%s' % (k, fields[k]) for k in ('type', 'name', 'class', 'tag', 'text', 'hint', 'label')
-                         if fields.get(k) and ';' not in fields[k] and fields[k] == fields[k].strip()]
-                if parts:
-                    target = ';'.join(parts)
-                    if target not in targets:
-                        targets[target] = len(find(target, selected['window']))
-                    n.update(target=target, target_window=selected['window'], target_match_count=targets[target])
-            result['nodes'].append(n)
+    data = parse(LIB.dump_slate_tree(selected['window'], locator, depth, False, True, 1000 if summary else limit, indices[0]))
+    if summary:
+        nodes = [n for win in data['windows'] for n in win['nodes']]
+        result['summary'] = _observation_summary(nodes, selected['rect'], limit)
+        result['summary'].update(scan_limit=1000, depth=depth, scan_truncated=data.get('truncated', False))
+        for target in result['summary']['targets']:
+            target.update(target_window=selected['window'], target_match_count=len(find(target['locator'], selected['window'])))
+    else:
+        targets = {}
+        for win in data['windows']:
+            for node in win['nodes']:
+                n = {k: node[k] for k in ('d', 'type', 'name', 'class', 'tag', 'text', 'hint', 'label', 'rect',
+                                        'visible_rect', 'enabled', 'interactable', 'focus', 'hover') if k in node}
+                if node.get('interactable'):
+                    target = _observation_target(node)
+                    if target:
+                        if target not in targets:
+                            targets[target] = len(find(target, selected['window']))
+                        n.update(target=target, target_window=selected['window'], target_match_count=targets[target])
+                result['nodes'].append(n)
     result.update(status='observed', root=locator, truncated=data.get('truncated', False),
                   focus=parse(LIB.get_keyboard_focus()), target_lifetime='Re-resolve target before input; no stable refs.',
                   verification='Structure only; visibility and routing do not prove business success.')
-    if result['truncated']:
+    if summary and result['truncated']:
+        result['recovery'] = 'Summary scan reached 1000 nodes; narrow root/depth. Raising output limit does not expand the scan.'
+    elif summary and any(result['summary']['output_truncated'].values()):
+        result['recovery'] = 'Summary categories are capped; narrow root or use tree/find for omitted details.'
+    elif result['truncated']:
         result['recovery'] = 'Narrow root/depth or raise limit; omitted nodes are not evidence of absence.'
     return result
 
@@ -277,6 +341,23 @@ def read_text(locator, window='', index=0):
             if n['type'] in EDITABLE_TYPES:
                 return n.get('text_full', n.get('text', ''))
     return node.get('text_full', node.get('text', ''))
+
+
+def text_snapshot(locator, window='', index=None):
+    """仅回读目标自身完整文字；不默认选首项，不搜索输入框后代。富文本保留源标记。"""
+    matches = find(locator, window)
+    if index is None and len(matches) != 1:
+        raise RuntimeError('text target must match exactly one widget (%d matched): %s' % (len(matches), locator))
+    selected = 0 if index is None else index
+    if isinstance(selected, bool) or not isinstance(selected, int) or not 0 <= selected < len(matches):
+        raise ValueError('text index out of range (%d matched)' % len(matches))
+    node = matches[selected]
+    if node['type'] not in EDITABLE_TYPES + ('STextBlock', 'SRichTextBlock', 'SInlineEditableTextBlock', 'SDockTab'):
+        raise RuntimeError('Target has no supported own text; use a text child Locator: ' + locator)
+    text = node.get('text_full', node.get('text', ''))
+    return {'kind': 'text', 'locator': locator, 'index': selected, 'window': node.get('window', window),
+            'node': {k: node[k] for k in ('type', 'name', 'class', 'rect', 'pie_instance') if k in node},
+            'text': text, 'length': len(text), 'source_markup': node['type'] == 'SRichTextBlock'}
 
 
 # ---------- 原子步骤 ----------

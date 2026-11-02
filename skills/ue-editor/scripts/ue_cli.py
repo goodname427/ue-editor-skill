@@ -494,7 +494,7 @@ def _present_result(result, verbose=False):
         return result
     result = dict(result)
     output, states, count = [], [], 0
-    for line in result.get('output', '').splitlines():
+    for line in result.get('output', '').replace('\r\n', '\n').split('\n'):
         if line.startswith('[input-request] '):
             count += 1
         elif line.startswith('[input checked] '):
@@ -514,8 +514,22 @@ def _present_result(result, verbose=False):
     if 'output' in result:
         result['output'] = '\n'.join(output)
         if len(result['output']) > 8000:
-            result['output'] = result['output'][:8000]
-            result['output_truncated'] = True
+            kept, remaining = [], 8000
+            for line in output:
+                try:
+                    structured = json.loads(line)
+                except ValueError:
+                    structured = None
+                if isinstance(structured, dict) and structured.get('kind') in ('ui', 'text'):
+                    kept.append(line)
+                elif remaining > 0:
+                    kept.append(line[:remaining])
+                    remaining -= len(line) + 1
+                    if len(kept[-1]) < len(line):
+                        result['output_truncated'] = True
+                elif line:
+                    result['output_truncated'] = True
+            result['output'] = '\n'.join(kept)
     if 'completed' in result:
         result['completed'] = [_present_result(step) for step in result['completed']]
     return result
@@ -528,8 +542,9 @@ def _observe_after(bridge, result, args):
         instance = args.ui_instance
         if args.ui_scope == 'pie' and instance is None and args.screenshot == 'pie':
             instance = args.shot_instance
-        observed = bridge.evaluate('__import__("json").dumps(__import__("ue_input").observe_ui(%r, %r, %r, %r, %r, %r))'
-                                   % (args.ui_root, instance, args.ui_window, args.ui_depth, args.ui_limit, args.ui_scope))
+        observed = bridge.evaluate('__import__("json").dumps(__import__("ue_input").observe_ui(%r, %r, %r, %r, %r, %r, summary=%r))'
+                                   % (args.ui_root, instance, args.ui_window, args.ui_depth, args.ui_limit, args.ui_scope,
+                                      getattr(args, 'ui_summary', False)))
         if observed['status'] == 'ok':
             try:
                 state = json.loads(ast.literal_eval(observed['result']))
@@ -906,6 +921,7 @@ def main():
     p_exec.add_argument('--ready-timeout', type=float, default=0, help='ui Locator 动作前只读等待可见/启用/稳定采样，0关闭，最多30秒；不重发动作')
     for command in (p_exec, p_sequence):
         command.add_argument('--observe-ui', action='store_true', help='动作后同连接返回有界窗口控件结构，无需Python表达式')
+        command.add_argument('--ui-summary', action='store_true', help='配合observe-ui：单次有界扫描，返回结构边界、目标及重复控件摘要；不是业务就绪判据')
         command.add_argument('--ui-scope', choices=('window', 'pie'), default='window', help='观察范围：默认通用窗口，pie启用实例/视口归属')
         command.add_argument('--ui-window', default='', help='观察窗口标题子串；停靠面板使用ui-root')
         command.add_argument('--ui-root', default='', help='观察子树的唯一根Locator')
@@ -925,6 +941,8 @@ def main():
     # 参数解析与命令分派
     args, extra = parser.parse_known_args()
     if args.subcommand in ('exec', 'sequence'):
+        if args.ui_summary and not args.observe_ui:
+            parser.error('--ui-summary requires --observe-ui')
         if not 1 <= args.ui_depth <= 20 or not 1 <= args.ui_limit <= 300:
             parser.error('--ui-depth 取1~20，--ui-limit 取1~300')
         if args.ui_instance is not None and args.ui_scope != 'pie':
