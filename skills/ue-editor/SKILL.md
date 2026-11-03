@@ -14,7 +14,7 @@ description: "Control Unreal Engine editor through Python Remote Execution. Use 
 3. **界面操作只用在两种情况**：一是脚本覆盖不了的操作（如只有界面入口的编辑器功能、弹窗、需要真实输入链路的 PIE 交互）；二是确认只能"看"出来的效果（布局、样式、遮挡）。
 4. **确认结果也优先读数据**：能回读属性、控件树、日志确认的，不截图。
 
-按需要重新决策的边界组织调用，不按每个鼠标动作/API 拆轮次：已知且已授权的跨帧流程用现有 `sequence`；陌生界面先 `exec --action ui observe --summary`（默认通用窗口，PIE用 `--scope=pie`），细节用 `find/tree`、完整文字用 `ui text <Locator>`；动作后加 `--observe-ui`（可选 `--ui-summary`）同次取回窗口、相关控件和目标匹配数，PIE用 `--ui-scope=pie` 追加实例/视口归属，对象/列表取数用 `ui object/list <Locator>`（只读反射属性、原生模型项与生成条目），额外字段用 `--observe <只读表达式>` 补充；目标尚未出现/移动时可加 `--ready-timeout=3` 做动作前有界门禁，输入只发一次。确需视觉才加 `--screenshot=pie|widget`（CLI仍返回路径，需读图）。参数和条件未知时先观察，不盲跑长链。输入路由成功不等于业务成功，业务判据用 `--wait-until` / 日志；详见 [控制开销](references/ui_verify.md#控制开销)。用了界面操作时，回复里说明脚本为什么覆盖不了。
+按需要重新决策的边界组织调用，不按每个鼠标动作/API 拆轮次：已知且已授权的跨帧流程用现有 `sequence`；陌生界面先 `exec --action ui observe --summary`（默认通用窗口，PIE用 `--scope=pie`），细节用 `find/tree`，按需字段用 `ui tree/find/observe ... --columns=name,type --properties=visibility,is_enabled`（节点列与原生反射分开，缺失/截断明确返回），完整文字用 `ui text <Locator>`；动作后加 `--observe-ui`（可选 `--ui-summary`）同次取回窗口、相关控件和目标匹配数，PIE用 `--ui-scope=pie` 追加实例/视口归属，对象/列表取数用 `ui object/list <Locator>`（只读反射属性、原生模型项与生成条目），额外字段用 `--observe <只读表达式>` 补充；目标尚未出现/移动时可加 `--ready-timeout=3` 做动作前有界门禁，输入只发一次。确需视觉才加 `--screenshot=pie|widget`（CLI仍返回路径，需读图）。参数和条件未知时先观察，不盲跑长链。输入路由成功不等于业务成功，业务判据用 `--wait-until` / 日志；详见 [控制开销](references/ui_verify.md#控制开销)。用了界面操作时，回复里说明脚本为什么覆盖不了。
 
 ## 命令
 
@@ -24,7 +24,7 @@ python scripts/ue_cli.py sequence --file <name.sequence.json> # 一次调用逐�
 python scripts/ue_cli.py screenshot --pie --name=<语义名> --archive=<目录> # 一次截图裁剪与归档；也可 --widget / --rect
 python scripts/ue_cli.py log mark/read/wait --file <日志路径>   # 本地日志观察，不经过编辑器
 python scripts/ue_cli.py discover                              # 确认编辑器在线
-python scripts/ue_cli.py inspector contexts|inspect|scopes --url=<本地WS地址> # 通用JS对象/显式函数闭包检查，不加载业务模块；用法见editor_tools.md
+python scripts/ue_cli.py inspector contexts|inspect|scopes|project --url=<本地WS地址> # JS数据源适配：对象/作用域/字段投影；UI字段直接用tree/find/observe
 ```
 
 - 多行代码写成 `.py` 用 `--file`；`exec` 成功时直接输出脚本 `print` 的文本，失败时输出 JSON 且退出码为 1。

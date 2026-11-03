@@ -22,6 +22,10 @@ fixture.closure = (() => {
     const hiddenState = { items: [101, 202, 303], selected: 202 };
     return function inspectFixtureAnchor() { fixture.calls++; return hiddenState; };
 })();
+fixture.rows = Array.from({ length: 150 }, (_, index) => ({
+    id: 9007199254740993n + BigInt(index), qty: index % 7, meta: { active: index % 2 === 0 }
+}));
+fixture.mixedRows = [fixture, , null, fixture.proxy, { value: undefined }];
 if (process.argv.includes('--multi-context')) {
     vm.runInContext('globalThis.fixture = { count: 999 }', vm.createContext({}, { name: 'second-context' }));
 }

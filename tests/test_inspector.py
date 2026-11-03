@@ -133,6 +133,17 @@ class InspectorTests(unittest.TestCase):
         self.assertEqual(result['error_type'], 'InspectorOutputLimit')
         self.assertTrue(self.socket.closed)
 
+    def test_final_output_budget_includes_cleanup_metadata(self):
+        template = {'status': 'ok', 'context': 1, 'path': '', 'scope_paths': [], 'data': {'text': ''},
+                    'coverage': 'Own data descriptors and explicitly selected runtime scopes only, bounded and non-atomic; no getters, module loading, business calls or pause/resume. Map/Set/Proxy expansion not supported.'}
+        size = len(json.dumps(template, ensure_ascii=False).encode('utf-8'))
+        data = {'text': 'x' * (65536 - size - 10)}
+        with mock.patch.object(inspector.ObjectReader, 'read', return_value=data):
+            result = inspector.inspect(self.url, 'fixture')
+        self.assertEqual(result['error_type'], 'InspectorOutputLimit')
+        self.assertEqual(result['cleanup']['object_group'], 'released')
+        self.assertLessEqual(len(json.dumps(result).encode('utf-8')), 65536)
+
     def test_rejects_remote_credentials_and_invalid_endpoint(self):
         for url in ('ws://example.com:9229/', 'wss://127.0.0.1:9229/', 'ws://192.168.0.1:9229/',
                     'ws://user@127.0.0.1:9229/', 'ws://127.0.0.1/', 'ws://127.0.0.1:9229/#fragment'):
@@ -449,6 +460,33 @@ class LiveV8Tests(unittest.TestCase):
         self.assertEqual(props['selected']['value'], 202)
         self.assertEqual([p['data']['value'] for p in props['items']['properties']], [101, 202, 303])
         self.assertEqual(state['cleanup']['object_group'], 'released')
+        self.assertEqual(self.snapshot(path='/calls')['value'], 0)
+
+    def test_real_projection_150_rows_nested_scalars_and_bigint(self):
+        result = inspector.inspect(self.url, 'fixture.rows', context_id=self.context, limit=150,
+                                   project_fields=['/id', '/qty', '/meta/active'])
+        self.assertEqual(result['status'], 'ok', result)
+        data = result['data']
+        self.assertTrue(data['complete'])
+        self.assertEqual(data['length'], 150)
+        self.assertEqual([r['fields']['/id']['unserializableValue'] for r in data['records']],
+                         [str(9007199254740993 + i) + 'n' for i in range(150)])
+        self.assertEqual([r['fields']['/qty']['value'] for r in data['records']], [i % 7 for i in range(150)])
+        self.assertEqual([r['fields']['/meta/active']['value'] for r in data['records']], [i % 2 == 0 for i in range(150)])
+        self.assertLess(result['exchanges'], 25)
+        self.assertGreater(result['requests'], 300)
+        self.assertEqual(result['cleanup']['object_group'], 'released')
+        self.assertEqual(self.snapshot(path='/calls')['value'], 0)
+
+    def test_real_projection_refuses_accessor_proxy_and_keeps_holes(self):
+        result = inspector.inspect(self.url, 'fixture.mixedRows', context_id=self.context, project_fields=['/danger', '/count'])
+        self.assertEqual(result['status'], 'ok', result)
+        rows = result['data']['records']
+        self.assertFalse(result['data']['complete'])
+        self.assertEqual(rows[1]['state'], 'hole')
+        self.assertEqual(rows[0]['fields']['/count']['value'], 7)
+        self.assertEqual(rows[0]['field_errors']['/danger']['error_type'], 'InspectorReadRefused')
+        self.assertEqual(rows[3]['field_errors']['/count']['error_type'], 'InspectorReadRefused')
         self.assertEqual(self.snapshot(path='/calls')['value'], 0)
 
     def test_real_proxy_refused_and_session_remains_usable(self):

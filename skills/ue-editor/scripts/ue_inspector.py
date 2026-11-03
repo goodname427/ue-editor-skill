@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 from urllib.parse import urlsplit
+from lib import ue_projection
 
 
 class InspectorError(Exception):
@@ -38,6 +39,7 @@ class InspectorSession:
         self.group = 'agent-inspect-' + uuid.uuid4().hex
         self.group_used = False
         self.requests = 0
+        self.exchanges = 0
         self.outstanding = set()
 
     def remaining(self, cleanup=False):
@@ -58,13 +60,29 @@ class InspectorSession:
             raise InspectorError('InspectorConnection', str(error))
 
     def request(self, method, params=None, cleanup=False):
-        self.sequence += 1
-        self.requests += 1
-        request_id = self.sequence
-        self.socket.settimeout(self.remaining(cleanup))
+        return self._exchange([(method, params or {})], cleanup)[0]
+
+    def properties_batch(self, object_ids):
+        if (not isinstance(object_ids, (tuple, list)) or not 1 <= len(object_ids) <= 32
+                or any(not isinstance(i, str) or not i or len(i) > 4096 for i in object_ids)):
+            raise InspectorError('InspectorArguments', 'Property batch requires 1..32 explicit object IDs')
+        return self._exchange([('Runtime.getProperties', {'objectId': i, 'ownProperties': True,
+                                                         'generatePreview': False}) for i in object_ids])
+
+    def _exchange(self, commands, cleanup=False):
+        self.remaining(cleanup)
+        self.exchanges += 1
+        ids, replies = [], {}
         try:
-            self.outstanding.add(request_id)
-            self.socket.send(json.dumps({'id': request_id, 'method': method, 'params': params or {}}))
+            for method, params in commands:
+                self.sequence += 1
+                request_id = self.sequence
+                ids.append(request_id)
+                self.outstanding.add(request_id)
+                self.socket.settimeout(self.remaining(cleanup))
+                self.socket.send(json.dumps({'id': request_id, 'method': method, 'params': params}))
+                self.requests += 1
+            pending = set(ids)
             received_bytes = 0
             for _ in range(20000):
                 self.socket.settimeout(self.remaining(cleanup))
@@ -74,19 +92,25 @@ class InspectorSession:
                 if not isinstance(raw, str) or not raw or size > 2 * 1024 * 1024:
                     raise InspectorError('InspectorResponse', 'Empty, non-text or oversized CDP response (maximum 2 MiB)')
                 if received_bytes > 32 * 1024 * 1024:
-                    raise InspectorError('InspectorResponse', 'CDP response/notification stream exceeds 32 MiB per request')
+                    raise InspectorError('InspectorResponse', 'CDP response/notification stream exceeds 32 MiB per exchange')
                 reply = json.loads(raw)
                 if 'id' in reply:
-                    if reply['id'] != request_id:
-                        if cleanup and reply['id'] in self.outstanding:
-                            self.outstanding.remove(reply['id'])
+                    response_id = reply['id']
+                    if response_id not in pending:
+                        if cleanup and response_id in self.outstanding:
+                            self.outstanding.remove(response_id)
                             continue
-                        raise InspectorError('InspectorResponse', 'Unexpected response ID')
-                    self.outstanding.discard(request_id)
+                        raise InspectorError('InspectorResponse', 'Unexpected or duplicate response ID')
+                    self.outstanding.discard(response_id)
+                    pending.remove(response_id)
                     if 'error' in reply:
                         raise InspectorError('InspectorProtocol', str(reply['error']))
-                    return reply.get('result', {})
-                if reply.get('method') == 'Runtime.executionContextCreated':
+                    if not isinstance(reply.get('result'), dict):
+                        raise InspectorError('InspectorResponse', 'Missing or invalid response result')
+                    replies[response_id] = reply['result']
+                    if not pending:
+                        return [replies[i] for i in ids]
+                elif reply.get('method') == 'Runtime.executionContextCreated':
                     context = reply['params']['context']
                     self.contexts[context['id']] = context
                 elif reply.get('method') == 'Runtime.executionContextDestroyed':
@@ -154,6 +178,81 @@ class ObjectReader:
                 raise InspectorError('InspectorReadRefused', 'Property enumeration raised an exception')
             self.cache[object_id] = response.get('result', [])
         return self.cache[object_id]
+
+    def prefetch(self, objects):
+        missing = {}
+        for obj in objects:
+            object_id = obj.get('objectId')
+            if (object_id and object_id not in self.cache and obj.get('type') == 'object'
+                    and obj.get('subtype') in (None, 'array')):
+                missing[object_id] = obj
+        if len(self.cache) + len(missing) > 1000:
+            raise InspectorError('InspectorProjectionLimit', 'Projection exceeds 1000 distinct descriptor objects; narrow fields/sample')
+        ids = list(missing)
+        for start in range(0, len(ids), 32):
+            batch = ids[start:start + 32]
+            responses = self.session.properties_batch(batch)
+            for object_id, response in zip(batch, responses):
+                if response.get('exceptionDetails') or not isinstance(response.get('result'), list):
+                    raise InspectorError('InspectorReadRefused', 'Batched property enumeration failed; no partial projection reported complete')
+                self.cache[object_id] = response['result']
+
+    def project(self, array, fields):
+        try:
+            fields = ue_projection.validate_fields(fields)
+        except ue_projection.ProjectionError as error:
+            raise InspectorError('InspectorArguments', str(error))
+        if not isinstance(self.limit, int) or isinstance(self.limit, bool) or not 1 <= self.limit <= 500:
+            raise InspectorError('InspectorArguments', 'Projection limit must be in 1..500')
+        if array.get('type') != 'object' or array.get('subtype') != 'array':
+            raise InspectorError('InspectorReadRefused', 'Projection requires an existing ordinary array')
+        props = self.properties(array)
+        length = next((p.get('value', {}).get('value') for p in props if p.get('name') == 'length'), None)
+        if isinstance(length, bool) or not isinstance(length, int) or length < 0:
+            raise InspectorError('InspectorResponse', 'Array length unavailable')
+        indexed = {p['name']: p for p in props if not p.get('symbol') and re.fullmatch(r'0|[1-9][0-9]*', p.get('name', ''))
+                   and int(p['name']) < 4294967295}
+        records, pending = [], []
+        for index in range(self.offset, min(length, self.offset + self.limit)):
+            row = ue_projection.new_record(index)
+            records.append(row)
+            prop = indexed.get(str(index))
+            if prop is None:
+                row['state'] = 'hole'
+            elif 'value' not in prop:
+                row.update(state='accessor', row_error='Array item is an accessor; not invoked')
+            else:
+                row['state'] = 'present'
+                for pointer in fields:
+                    pending.append((row, pointer, prop['value'], pointer[1:].split('/')))
+        while pending:
+            self.prefetch([obj for _, _, obj, _ in pending])
+            following = []
+            for row, pointer, obj, segments in pending:
+                try:
+                    if obj.get('type') != 'object' or obj.get('subtype') not in (None, 'array'):
+                        raise InspectorError('InspectorReadRefused', 'Projection traverses ordinary own data only; no functions, collections or Proxy')
+                    value = self.follow(obj, '/' + segments[0])
+                    if len(segments) > 1:
+                        following.append((row, pointer, value, segments[1:]))
+                    elif value.get('objectId') or value.get('type') in ('object', 'function', 'symbol') and value.get('subtype') != 'null':
+                        raise InspectorError('InspectorReadRefused', 'Projected field must be a scalar/null; select a deeper data field')
+                    else:
+                        row['fields'][pointer] = {k: value[k] for k in ('type', 'subtype', 'value', 'unserializableValue') if k in value}
+                        if isinstance(value.get('value'), str) and len(value['value']) > 512:
+                            row['fields'][pointer].update(value=value['value'][:512], value_truncated=True, length=len(value['value']))
+                except InspectorError as error:
+                    if error.kind not in ('InspectorPathMissing', 'InspectorReadRefused'):
+                        raise
+                    ue_projection.field_error(row, pointer, error.kind, error)
+            pending = following
+        try:
+            result = ue_projection.finish(records, fields, length, self.offset, self.limit, 'cdp')
+        except ue_projection.ProjectionError as error:
+            raise InspectorError('InspectorOutputLimit', str(error))
+        result.update(non_index_properties_omitted=len(props) - len(indexed) - 1,
+                      coverage='Explicit scalar own-data fields of sampled array indices; holes and refusals retained, non-atomic. No getters, calls or pause.')
+        return result
 
     def scopes(self, function):
         if function.get('type') != 'function' or function.get('subtype') == 'proxy' or not function.get('objectId'):
@@ -264,13 +363,20 @@ class ObjectReader:
 
 
 def inspect(url, expression=None, context_id=None, path='', depth=1, offset=0, limit=20, timeout=8,
-            scope_paths=(), list_scopes=False):
+            scope_paths=(), list_scopes=False, project_fields=()):
     session = None
     result = {'status': 'error'}
     try:
+        try:
+            project_fields = ue_projection.validate_fields(project_fields, allow_empty=True)
+        except ue_projection.ProjectionError as error:
+            raise InspectorError('InspectorArguments', str(error))
+        if project_fields and (list_scopes or expression is None):
+            raise InspectorError('InspectorArguments', 'Projection fields must be unique and require an array reference, not a scopes/context listing')
+        max_limit = 500 if project_fields else 100
         if (any(isinstance(n, bool) for n in (depth, offset, limit)) or not isinstance(depth, int) or not 0 <= depth <= 3
-                or not isinstance(offset, int) or offset < 0 or not isinstance(limit, int) or not 1 <= limit <= 100):
-            raise InspectorError('InspectorArguments', 'depth in 0..3, offset nonnegative, limit in 1..100')
+                or not isinstance(offset, int) or offset < 0 or not isinstance(limit, int) or not 1 <= limit <= max_limit):
+            raise InspectorError('InspectorArguments', 'depth in 0..3, offset nonnegative, limit in 1..%d' % max_limit)
         if context_id is not None and (isinstance(context_id, bool) or not isinstance(context_id, int) or context_id <= 0):
             raise InspectorError('InspectorArguments', 'context must be a positive integer')
         if expression is not None and (not isinstance(expression, str) or len(expression) > 4096
@@ -323,7 +429,8 @@ def inspect(url, expression=None, context_id=None, path='', depth=1, offset=0, l
                 result = dict(status='ok', context=selected, scope_paths=list(scope_paths), **reader.scope_summary(root))
             else:
                 root = reader.follow(root, path)
-                result = {'status': 'ok', 'context': selected, 'path': path, 'scope_paths': list(scope_paths), 'data': reader.read(root),
+                result = {'status': 'ok', 'context': selected, 'path': path, 'scope_paths': list(scope_paths),
+                          'data': reader.project(root, project_fields) if project_fields else reader.read(root),
                           'coverage': 'Own data descriptors and explicitly selected runtime scopes only, bounded and non-atomic; no getters, module loading, business calls or pause/resume. Map/Set/Proxy expansion not supported.'}
         if len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode('utf-8')) > 65536:
             raise InspectorError('InspectorOutputLimit', 'Output exceeds 64 KiB; narrow path/depth/sample. No partial result reported as complete.')
@@ -340,6 +447,10 @@ def inspect(url, expression=None, context_id=None, path='', depth=1, offset=0, l
         if session:
             result['cleanup'] = session.close()
             result['requests'] = session.requests
+            result['exchanges'] = session.exchanges
             if result['status'] == 'ok' and (result['cleanup'].get('object_group') == 'unconfirmed' or not result['cleanup']['connection_closed']):
                 result.update(status='error', error_type='InspectorCleanup', message='Cleanup could not be confirmed')
+    if len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode('utf-8')) > 65536:
+        result = {'status': 'error', 'error_type': 'InspectorOutputLimit', 'message': 'Final result exceeds 64 KiB; narrow fields/sample',
+                  'cleanup': result.get('cleanup', {}), 'requests': result.get('requests', 0), 'exchanges': result.get('exchanges', 0)}
     return result

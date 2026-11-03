@@ -2,6 +2,7 @@
 import math
 import unreal
 from ue_input import find
+import ue_projection
 
 
 def _object_info(obj):
@@ -51,6 +52,56 @@ def _properties(obj, fields):
         except Exception as error:
             errors[name] = str(error)
     return {'properties': values, 'property_errors': errors}
+
+
+def project_nodes(nodes, columns=(), properties=(), offset=0, limit=80, indices=None, truncated=False):
+    """Project already-selected Slate nodes; optionally read their existing source UObjects."""
+    column_fields = ue_projection.names_to_fields(columns)
+    property_fields = ue_projection.names_to_fields(properties)
+    if not column_fields and not property_fields:
+        raise ValueError('Select node columns and/or reflected properties')
+    if len(column_fields) + len(property_fields) > 16:
+        raise ValueError('At most 16 combined columns/properties')
+    if (isinstance(offset, bool) or not isinstance(offset, int) or offset < 0
+            or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500):
+        raise ValueError('Projection offset must be nonnegative and limit in 1..500')
+    records, cache, resolved_paths = [], {}, set()
+    for position in range(offset, min(len(nodes), offset + limit)):
+        node = nodes[position]
+        identity = {k: node[k] for k in ('d', 'type', 'name', 'window', 'pie_instance', 'query_only', 'visible_path',
+                                         'geometry_valid', 'target_match_count') if k in node}
+        row = ue_projection.new_record(indices[position] if indices is not None else position, identity)
+        for name, pointer in zip(columns, column_fields):
+            try:
+                row['fields']['/node' + pointer] = ue_projection.dict_field(node, pointer)
+            except ue_projection.ProjectionError as error:
+                ue_projection.field_error(row, '/node' + pointer, 'FieldMissingOrUnsupported', error)
+        if properties:
+            path = node.get('object_path', '')
+            if path not in cache:
+                try:
+                    if not path:
+                        raise ValueError('Slate node has no source object_path; no object is guessed or loaded')
+                    cache[path] = _properties(resolve(path=path), properties)
+                    resolved_paths.add(path)
+                except Exception as error:
+                    cache[path] = {'properties': {}, 'property_errors': {n: str(error) for n in properties}}
+            values = cache[path]
+            for name, pointer in zip(properties, property_fields):
+                if name in values['property_errors']:
+                    ue_projection.field_error(row, '/property' + pointer, 'ReflectedPropertyError', values['property_errors'][name])
+                else:
+                    try:
+                        row['fields']['/property' + pointer] = ue_projection.bounded_value(values['properties'][name])
+                    except ue_projection.ProjectionError as error:
+                        ue_projection.field_error(row, '/property' + pointer, 'FieldUnsupported', error)
+        records.append(row)
+    result = ue_projection.finish(records, ['/node' + p for p in column_fields] + ['/property' + p for p in property_fields],
+                                  len(nodes), offset, limit, 'slate+reflection' if properties else 'slate', truncated)
+    result.update(reflected_object_count=len(resolved_paths),
+                  coverage='Selected Slate node columns and explicit reflected source properties only; indices are current-query-local, not inventory counts or business assertions.')
+    ue_projection.check_output(result)
+    return result
 
 
 def object_snapshot(path='', locator='', window='', index=None, fields=()):

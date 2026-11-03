@@ -18,6 +18,7 @@
 
 1. **能用脚本做的不走 UI**：查资产用 AssetRegistry、改蓝图用 WBP 编辑接口、启停 PIE 用 `exec --action pie`。UI 操作只用于确认效果，或没有 API 的操作。
 2. **已知目标用 `find`，陌生界面先摘要**：`ui observe --summary` 单次有界扫描后给浅层UserWidget边界、目标、文字与重复控件组；动作后可 `--observe-ui --ui-summary`。根候选不等于当前业务页，重复计数不等于列表项，扫描/分类截断各自标明；仍需按现场缩根或 `find` 确认唯一目标。`tree` 用来查看细节，默认最多120节点；先缩小范围，确需更多才增大 `--max`。长文字只取目标：`ui text <文字Locator>`，默认唯一，完整保留富文本源标记，不靠读整树拼全文。
+   按需取字段：`ui tree/find/observe ... --columns=name,type,text --properties=visibility,is_enabled`，节点列只裁剪返回、反射属性同次批量读；默认行为不变，不能与summary混用。先解析范围/匹配再投影，身份/原下标/树层级/hidden风险不丢；字段缺失或输出/扫描截断必须单独判读，complete不是业务成功。
    控件数不能替代数据数：`ui list <当前列表Locator>` 读取原生模型项数、生成entry及采样项对象；`ui object <Locator> --fields=...` 读当前反射属性。模型也可能包含占位，生成entry不等于当前屏幕可见项。只读字段失败、关联不完整或TS字段未公开都要保留，不按0处理，不为验证直接写真实列表。
 3. **操作和确认放在同一次调用**：给操作加 `--wait-until`，等期望的控件出现或消失，省掉单独的观察调用：
 

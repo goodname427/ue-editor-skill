@@ -10,6 +10,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'skills' / 'ue-editor' / 'scripts'))
+sys.path.insert(0, str(ROOT / 'skills' / 'ue-editor' / 'scripts' / 'lib'))
 import ue_cli
 
 

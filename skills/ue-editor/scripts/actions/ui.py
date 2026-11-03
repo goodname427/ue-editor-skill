@@ -6,6 +6,7 @@
   exec --action ui text <文字Locator> [--window=标题] [--index=N]       完整回读目标自身文字；默认要求唯一，富文本保留源标记，不取后代文字
   exec --action ui object <Locator> [--fields=属性1,属性2] [--index=N]   通过源object_path只读反射字段；也可用 --path=<运行时对象路径>
   exec --action ui list <Locator> [--offset=0] [--limit=10] [--fields=属性1,属性2]  原生逻辑项/生成entry/选中索引与有界采样；也可 --path
+  exec --action ui tree/find/observe ... --columns=name,type,text --properties=visibility,is_enabled [--offset=0 --limit=80]   节点列裁剪与同次反射读取；最多16字段，不与summary混用
   exec --action ui windows                                         列出可见窗口
   exec --action ui tree [根Locator] [--index=N] [--depth=N] [--window=标题] [--full] [--hidden] [--max=N]
   exec --action ui find <Locator> [--window=标题] [--hidden] [--root=<Locator>] [--no-suggest] [--in-row-of=<Locator>]  无命中时诊断隐藏/裁剪或给只读候选
@@ -116,7 +117,7 @@ def print_target(node):
 
 
 cmd = ARGS[0] if ARGS else ''
-for key in ('index', 'depth', 'max', 'delta', 'at', 'from_image', 'point', 'window', 'focus', 'expect_hit', 'hold', 'max_hold', 'frames', 'to', 'to_target', 'to_index', 'drop_target', 'ancestor', 'root', 'device', 'in_row_of', 'instance', 'scope', 'path', 'fields', 'offset', 'limit'):
+for key in ('index', 'depth', 'max', 'delta', 'at', 'from_image', 'point', 'window', 'focus', 'expect_hit', 'hold', 'max_hold', 'frames', 'to', 'to_target', 'to_index', 'drop_target', 'ancestor', 'root', 'device', 'in_row_of', 'instance', 'scope', 'path', 'fields', 'offset', 'limit', 'columns', 'properties'):
     if OPTS.get(key) is True:
         raise RuntimeError('--%s needs a value; use --%s=<value>, not --%s <value>' % (key, key, key))
 if 'from_image' in OPTS or 'point' in OPTS:
@@ -134,12 +135,36 @@ if row_of and cmd != 'find':
     index = ue_input.row_index(row_target, row_of, window, index)
 mods = (bool(OPTS.get('ctrl')), bool(OPTS.get('shift')), bool(OPTS.get('alt')))
 max_hold = float(OPTS.get('max_hold', ue_input.MAX_HOLD))
+project_requested = 'columns' in OPTS or 'properties' in OPTS
+if project_requested:
+    import ue_projection
+    if cmd not in ('observe', 'tree', 'find') or OPTS.get('summary'):
+        raise RuntimeError('--columns/--properties require observe/tree/find without --summary; object/list --fields keeps its property meaning')
+    columns = tuple(str(OPTS['columns']).split(',')) if 'columns' in OPTS else ()
+    properties = tuple(str(OPTS['properties']).split(',')) if 'properties' in OPTS else ()
+    ue_projection.names_to_fields(columns)
+    ue_projection.names_to_fields(properties)
+    if len(columns) + len(properties) > 16:
+        raise RuntimeError('At most 16 combined columns/properties')
+    if int(OPTS.get('offset', 0)) < 0 or not 1 <= int(OPTS.get('limit', 80)) <= 500:
+        raise RuntimeError('Projection offset nonnegative; limit 1..500')
+
+
+def project_nodes(nodes, indices=None, truncated=False):
+    import ue_runtime
+    return ue_runtime.project_nodes(nodes, columns, properties, int(OPTS.get('offset', 0)),
+                                    int(OPTS.get('limit', 80)), indices, truncated)
+
 
 if cmd == 'observe':
     import json
     observation = ue_input.observe_ui(OPTS.get('root', ''), int(OPTS['instance']) if 'instance' in OPTS else None,
                                       window, int(OPTS.get('depth', 6)), int(OPTS.get('max', 80)), OPTS.get('scope', 'window'),
                                       **({'summary': True} if OPTS.get('summary') else {}))
+    if project_requested and observation['status'] == 'observed':
+        observation['projection'] = project_nodes(observation['nodes'], truncated=observation.get('truncated', False))
+        observation['nodes'] = []
+        ue_projection.check_output(observation)
     print(json.dumps(observation, ensure_ascii=False))
     if observation['status'] != 'observed':
         failure = dict(ok=False, message=observation['status'], observation=observation)
@@ -176,16 +201,28 @@ elif cmd == 'tree':
     data = parse(lib.dump_slate_tree(*call))
     if root and data.get('root_match_count', 0) == 0:
         raise RuntimeError('Root Locator did not match: %s; use ui find to verify name/type/class and visibility' % root)
-    out = []
-    for win in data['windows']:
-        out.append('== %s [%d,%d,%d,%d]' % ((win['title'] or '(untitled popup)',) + tuple(win['rect'])))
-        nodes = win['nodes'] if OPTS.get('full') else fold_text_children(win['nodes'])
-        out.extend(line(n, '  ' * n['d']) for n in nodes)
-    if data.get('truncated'):
-        out.append('... truncated at %d nodes, narrow with root Locator / --index / --depth' % data['node_count'])
-    if root and data.get('root_match_count', 0) > 1 and 'index' not in OPTS:
-        out.append('... root matched %d times, add --index=N to dump only one' % data['root_match_count'])
-    print('\n'.join(out) or '(no match)')
+    if project_requested:
+        import json
+        nodes = [dict(n, window=win['title']) for win in data['windows'] for n in win['nodes']]
+        projected = dict(kind='ui', command='tree', root=root,
+                         windows=[{k: v for k, v in win.items() if k != 'nodes'} for win in data['windows']],
+                         root_match_count=data.get('root_match_count'), truncated=data.get('truncated', False),
+                         query_only=bool(OPTS.get('hidden')), projection=project_nodes(nodes, truncated=data.get('truncated', False)))
+        if root and data.get('root_match_count', 0) > 1 and 'index' not in OPTS:
+            projected['recovery'] = 'Multiple roots; select --index after resolving current matches'
+        ue_projection.check_output(projected)
+        print(json.dumps(projected, ensure_ascii=False))
+    else:
+        out = []
+        for win in data['windows']:
+            out.append('== %s [%d,%d,%d,%d]' % ((win['title'] or '(untitled popup)',) + tuple(win['rect'])))
+            nodes = win['nodes'] if OPTS.get('full') else fold_text_children(win['nodes'])
+            out.extend(line(n, '  ' * n['d']) for n in nodes)
+        if data.get('truncated'):
+            out.append('... truncated at %d nodes, narrow with root Locator / --index / --depth' % data['node_count'])
+        if root and data.get('root_match_count', 0) > 1 and 'index' not in OPTS:
+            out.append('... root matched %d times, add --index=N to dump only one' % data['root_match_count'])
+        print('\n'.join(out) or '(no match)')
 
 elif cmd == 'find':
     if len(ARGS) < 2:
@@ -194,12 +231,21 @@ elif cmd == 'find':
     if row_of and OPTS.get('hidden'):
         raise RuntimeError('--in-row-of uses visible geometry; do not combine it with --hidden')
     rows = ue_input.in_row(matches, row_of, window) if row_of else list(enumerate(matches))
-    print('\n'.join('[%d] %s  (%s)' % (i, line(n), n['window'] or 'untitled popup') for i, n in rows) or '(no match)')
-    if row_of:
+    if project_requested:
+        import json
+        projected = dict(kind='ui', command='find', locator=ARGS[1], match_count=len(matches),
+                         query_only=bool(OPTS.get('hidden')), row_filter=row_of,
+                         projection=project_nodes([n for _, n in rows], [i for i, _ in rows]),
+                         coverage='Current query indices only; hidden results cannot be reused for input. Zero matches does not imply absent hidden widgets.')
+        ue_projection.check_output(projected)
+        print(json.dumps(projected, ensure_ascii=False))
+    else:
+        print('\n'.join('[%d] %s  (%s)' % (i, line(n), n['window'] or 'untitled popup') for i, n in rows) or '(no match)')
+    if row_of and not project_requested:
         print('[row filter] [N] is the index in the full match set; --index=N alone, or keep --in-row-of with --index=<position in row>')
-    if OPTS.get('hidden'):
+    if OPTS.get('hidden') and not project_requested:
         print('[query only] hidden-result indices/geometry cannot be reused for click or screenshot')
-    if not matches and not OPTS.get('no_suggest'):
+    if not matches and not OPTS.get('no_suggest') and not project_requested:
         hidden = ue_input.find(ARGS[1], window, include_hidden=True) if not OPTS.get('hidden') else []
         if hidden:
             print('[query only] target exists but is hidden, unarranged or clipped; do not reuse diagnostic indices')

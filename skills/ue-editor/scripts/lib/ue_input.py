@@ -286,7 +286,9 @@ def observe_ui(root='', instance=None, window='', depth=6, limit=80, scope='wind
         for win in data['windows']:
             for node in win['nodes']:
                 n = {k: node[k] for k in ('d', 'type', 'name', 'class', 'object_path', 'tag', 'text', 'hint', 'label', 'rect',
-                                        'visible_rect', 'enabled', 'interactable', 'focus', 'hover') if k in node}
+                                        'visible_rect', 'enabled', 'interactable', 'focus', 'hover', 'pie_instance',
+                                        'query_only', 'visible_path', 'geometry_valid') if k in node}
+                n['window'] = selected['window']
                 if node.get('interactable'):
                     target = _observation_target(node)
                     if target:
