@@ -18,6 +18,10 @@ Object.defineProperty(fixture, 'danger', {
     enumerable: true,
     get() { fixture.calls++; return 99; }
 });
+fixture.closure = (() => {
+    const hiddenState = { items: [101, 202, 303], selected: 202 };
+    return function inspectFixtureAnchor() { fixture.calls++; return hiddenState; };
+})();
 if (process.argv.includes('--multi-context')) {
     vm.runInContext('globalThis.fixture = { count: 999 }', vm.createContext({}, { name: 'second-context' }));
 }

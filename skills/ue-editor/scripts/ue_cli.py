@@ -695,7 +695,8 @@ def cmd_inspector(args):
     result = ue_inspector.inspect(args.url, expression=getattr(args, 'expression', None),
                                   context_id=getattr(args, 'context', None), path=getattr(args, 'path', ''),
                                   depth=getattr(args, 'depth', 1), offset=getattr(args, 'offset', 0),
-                                  limit=getattr(args, 'limit', 20), timeout=args.timeout)
+                                  limit=getattr(args, 'limit', 20), timeout=args.timeout,
+                                  scope_paths=getattr(args, 'scope_path', ()), list_scopes=args.inspector_command == 'scopes')
     _print_json(result)
     if result['status'] != 'ok':
         sys.exit(1)
@@ -907,17 +908,19 @@ def main():
 
     p_inspector = sub.add_parser('inspector', allow_abbrev=False, help='本地CDP上下文与对象检查，不暂停或加载业务模块')
     inspector_sub = p_inspector.add_subparsers(dest='inspector_command', required=True)
-    for mode in ('contexts', 'inspect'):
+    for mode in ('contexts', 'inspect', 'scopes'):
         command = inspector_sub.add_parser(mode, allow_abbrev=False)
         command.add_argument('--url', required=True, help='明确授权的本地ws://127.0.0.1:<port>/<target>，不猜端口或扫描')
         command.add_argument('--timeout', type=float, default=8, help='连接/读取/清理总预算1~60秒')
-        if mode == 'inspect':
-            command.add_argument('--expression', required=True, help='已有对象的全局引用/属性路径，强制副作用检查，不支持函数调用')
+        if mode != 'contexts':
+            command.add_argument('--expression', required=True, help='已有对象/函数的全局引用，仅own字段路径，不支持函数调用')
             command.add_argument('--context', type=int, default=None, help='执行上下文ID，多个上下文必须选择')
+            command.add_argument('--scope-path', action='append', default=[], help='显式函数scope索引与字段路径，如/0/state；最多4跳，不调用函数')
+            command.add_argument('--offset', type=int, default=0, help='属性、数组或scope采样起点')
+            command.add_argument('--limit', type=int, default=20, help='每层最多1~100属性/项，scope摘要上限32')
+        if mode == 'inspect':
             command.add_argument('--path', default='', help='根对象下的JSON pointer，如/items/0/name，仅数据属性')
             command.add_argument('--depth', type=int, default=1, help='展开深度0~3，最多200节点')
-            command.add_argument('--offset', type=int, default=0, help='属性或数组索引采样起点')
-            command.add_argument('--limit', type=int, default=20, help='每层最多1~100属性/项')
 
     # screenshot
     p_ss = sub.add_parser('screenshot', parents=[parent_parser], help='截取 UE 编辑器窗口（Win32 抓取，不阻塞编辑器）')

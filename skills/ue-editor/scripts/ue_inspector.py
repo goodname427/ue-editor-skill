@@ -65,11 +65,16 @@ class InspectorSession:
         try:
             self.outstanding.add(request_id)
             self.socket.send(json.dumps({'id': request_id, 'method': method, 'params': params or {}}))
-            for _ in range(1000):
+            received_bytes = 0
+            for _ in range(20000):
                 self.socket.settimeout(self.remaining(cleanup))
                 raw = self.socket.recv()
-                if not isinstance(raw, str) or not raw or len(raw.encode('utf-8')) > 2 * 1024 * 1024:
+                size = len(raw.encode('utf-8')) if isinstance(raw, str) else 0
+                received_bytes += size
+                if not isinstance(raw, str) or not raw or size > 2 * 1024 * 1024:
                     raise InspectorError('InspectorResponse', 'Empty, non-text or oversized CDP response (maximum 2 MiB)')
+                if received_bytes > 32 * 1024 * 1024:
+                    raise InspectorError('InspectorResponse', 'CDP response/notification stream exceeds 32 MiB per request')
                 reply = json.loads(raw)
                 if 'id' in reply:
                     if reply['id'] != request_id:
@@ -150,6 +155,40 @@ class ObjectReader:
             self.cache[object_id] = response.get('result', [])
         return self.cache[object_id]
 
+    def scopes(self, function):
+        if function.get('type') != 'function' or function.get('subtype') == 'proxy' or not function.get('objectId'):
+            raise InspectorError('InspectorScopeRefused', 'Scope inspection requires an existing non-Proxy function reference')
+        response = self.session.request('Runtime.getProperties', {'objectId': function['objectId'], 'ownProperties': True,
+                                                                 'generatePreview': False})
+        if response.get('exceptionDetails'):
+            raise InspectorError('InspectorScopeRefused', 'Function descriptor inspection failed')
+        scopes = [p.get('value', {}) for p in response.get('internalProperties', []) if p.get('name') == '[[Scopes]]']
+        if (len(scopes) != 1 or scopes[0].get('type') != 'object'
+                or scopes[0].get('subtype') != 'internal#scopeList' or not scopes[0].get('objectId')):
+            raise InspectorError('InspectorScopesUnavailable', 'Runtime did not expose a scope list for this function; no fallback invocation')
+        return scopes[0]
+
+    def follow_scope(self, function, path):
+        index, separator, tail = path[1:].partition('/')
+        scope = self.follow(self.scopes(function), '/' + index)
+        if scope.get('type') != 'object' or scope.get('subtype') != 'internal#scope' or not scope.get('objectId'):
+            raise InspectorError('InspectorScopeRefused', 'Selected entry is not an inspectable runtime scope')
+        return self.follow(scope, '/' + tail if separator else '')
+
+    def scope_summary(self, function):
+        scopes = self.scopes(function)
+        props = self.properties(scopes)
+        indexed = sorted((p for p in props if re.fullmatch(r'0|[1-9][0-9]*', p.get('name', '')) and not p.get('symbol')),
+                         key=lambda p: int(p['name']))
+        selected = indexed[self.offset:self.offset + min(self.limit, 32)]
+        values = [{'index': int(p['name']), 'description': p.get('value', {}).get('description', '')[:160],
+                   'available': p.get('value', {}).get('type') == 'object'
+                                and p.get('value', {}).get('subtype') == 'internal#scope'
+                                and bool(p.get('value', {}).get('objectId'))} for p in selected]
+        return {'kind': 'scopes', 'scopes': values, 'scope_count': len(indexed),
+                'scopes_truncated': self.offset > 0 or self.offset + len(values) < len(indexed),
+                'coverage': 'Runtime-exposed function scopes only; indices are session-local, no variable values or function calls.'}
+
     def follow(self, root, path):
         if not path:
             return root
@@ -224,7 +263,8 @@ class ObjectReader:
         return result
 
 
-def inspect(url, expression=None, context_id=None, path='', depth=1, offset=0, limit=20, timeout=8):
+def inspect(url, expression=None, context_id=None, path='', depth=1, offset=0, limit=20, timeout=8,
+            scope_paths=(), list_scopes=False):
     session = None
     result = {'status': 'error'}
     try:
@@ -236,9 +276,18 @@ def inspect(url, expression=None, context_id=None, path='', depth=1, offset=0, l
         if expression is not None and (not isinstance(expression, str) or len(expression) > 4096
                 or not re.fullmatch(r'[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*|\[(?:[0-9]+|"(?:[^"\\\r\n]|\\.)*")\])*', expression)):
             raise InspectorError('InspectorArguments', 'Use only an existing global reference/property path; calls, assignments and arbitrary code are not accepted')
-        if (not isinstance(path, str) or (path and not path.startswith('/')) or len(path) > 4096
-                or (path and len(path[1:].split('/')) > 16) or re.search(r'~(?![01])', path)):
-            raise InspectorError('InspectorArguments', 'path must be a valid JSON pointer up to 4096 characters and 16 segments')
+        if not isinstance(scope_paths, (tuple, list)) or len(scope_paths) > 4 or not isinstance(list_scopes, bool):
+            raise InspectorError('InspectorArguments', 'At most four explicit scope paths are supported')
+        for pointer in (path, *scope_paths):
+            if (not isinstance(pointer, str) or (pointer and not pointer.startswith('/')) or len(pointer) > 4096
+                    or (pointer and len(pointer[1:].split('/')) > 16) or re.search(r'~(?![01])', pointer)):
+                raise InspectorError('InspectorArguments', 'path must be a valid JSON pointer up to 4096 characters and 16 segments')
+        if any(not re.match(r'^/(?:0|[1-9][0-9]*)(?:/|$)', p) for p in scope_paths):
+            raise InspectorError('InspectorArguments', 'Each scope path must begin with an explicit scope index')
+        if (scope_paths or list_scopes) and expression is None:
+            raise InspectorError('InspectorArguments', 'Scope inspection requires a function reference')
+        if list_scopes and path:
+            raise InspectorError('InspectorArguments', 'scopes lists labels only; use scope-path to select a function')
         reference = ''
         if expression is not None:
             names = []
@@ -267,9 +316,15 @@ def inspect(url, expression=None, context_id=None, path='', depth=1, offset=0, l
             if selected not in session.contexts:
                 raise InspectorError('InspectorContextMissing', 'Requested context not available')
             reader = ObjectReader(session, depth, offset, limit)
-            root = reader.follow(reader.follow(session.evaluate('globalThis', selected), reference), path)
-            result = {'status': 'ok', 'context': selected, 'path': path, 'data': reader.read(root),
-                      'coverage': 'Own data descriptors only, bounded and non-atomic; no getters, module loading, business calls or pause/resume. Map/Set/Proxy expansion not supported.'}
+            root = reader.follow(session.evaluate('globalThis', selected), reference)
+            for scope_path in scope_paths:
+                root = reader.follow_scope(root, scope_path)
+            if list_scopes:
+                result = dict(status='ok', context=selected, scope_paths=list(scope_paths), **reader.scope_summary(root))
+            else:
+                root = reader.follow(root, path)
+                result = {'status': 'ok', 'context': selected, 'path': path, 'scope_paths': list(scope_paths), 'data': reader.read(root),
+                          'coverage': 'Own data descriptors and explicitly selected runtime scopes only, bounded and non-atomic; no getters, module loading, business calls or pause/resume. Map/Set/Proxy expansion not supported.'}
         if len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode('utf-8')) > 65536:
             raise InspectorError('InspectorOutputLimit', 'Output exceeds 64 KiB; narrow path/depth/sample. No partial result reported as complete.')
     except InspectorError as error:

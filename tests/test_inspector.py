@@ -183,6 +183,28 @@ class InspectorTests(unittest.TestCase):
         self.assertEqual(result['cleanup']['object_group'], 'released')
         self.assertTrue(self.socket.closed)
 
+    def test_console_backlog_more_than_1000_events_does_not_hide_reply(self):
+        original = self.socket.send
+        def send(raw):
+            request = json.loads(raw)
+            if request['method'] == 'Runtime.enable':
+                self.socket.messages.extend(json.dumps({'method': 'Runtime.consoleAPICalled', 'params': {}}) for _ in range(1200))
+            original(raw)
+        self.socket.send = send
+        result = inspector.inspect(self.url, 'fixture.count')
+        self.assertEqual(result['status'], 'ok', result)
+        self.assertEqual(result['data']['value'], 7)
+        self.assertEqual(result['cleanup']['object_group'], 'released')
+
+    def test_console_stream_bytes_remain_bounded(self):
+        original = self.socket.recv
+        event = json.dumps({'method': 'Runtime.consoleAPICalled', 'params': {'text': 'x' * 1000000}})
+        self.socket.recv = lambda: event
+        result = inspector.inspect(self.url)
+        self.assertEqual(result['error_type'], 'InspectorResponse')
+        self.assertIn('32 MiB', result['message'])
+        self.assertTrue(self.socket.closed)
+
     def test_transport_disables_proxy_and_redirects(self):
         import websocket
         self.assertEqual(inspector.inspect('ws://127.0.0.2:9230/test')['status'], 'ok')
@@ -195,6 +217,21 @@ class InspectorTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(inspector.inspect(self.url, 'fixture', path=path)['error_type'], 'InspectorArguments')
         self.assertEqual(self.socket.sent, [])
+
+    def test_invalid_scope_paths_are_rejected_before_connection(self):
+        for options in ({'scope_paths': ['/x']}, {'scope_paths': ['/0'] * 5},
+                        {'scope_paths': ['/0/x~2']}, {'scope_paths': 'not-list'},
+                        {'list_scopes': True, 'path': '/x'}):
+            with self.subTest(options=options):
+                result = inspector.inspect(self.url, 'fixture', **options)
+                self.assertEqual(result['error_type'], 'InspectorArguments')
+        self.assertEqual(self.socket.sent, [])
+
+    def test_scope_read_failure_releases_own_group(self):
+        result = inspector.inspect(self.url, 'fixture', scope_paths=['/0'])
+        self.assertEqual(result['error_type'], 'InspectorScopeRefused')
+        self.assertEqual(result['cleanup']['object_group'], 'released')
+        self.assertTrue(self.socket.closed)
 
     def test_local_cli_does_not_create_ue_bridge(self):
         args = ['ue_cli.py', 'inspector', 'inspect', '--url', self.url, '--expression', 'fixture.count']
@@ -291,6 +328,31 @@ class ReaderTests(unittest.TestCase):
         with self.assertRaises(inspector.InspectorError):
             self.reader([]).follow(dict(self.root, subtype='proxy'), '/x')
 
+    def test_scopes_require_function_and_internal_scope_list(self):
+        reader = self.reader([])
+        with self.assertRaises(inspector.InspectorError):
+            reader.scopes(self.root)
+        function = {'type': 'function', 'objectId': 'fn'}
+        for value in ({'type': 'object', 'subtype': 'array', 'objectId': 'scopes'},
+                      {'type': 'function', 'subtype': 'internal#scopeList', 'objectId': 'scopes'},
+                      {'type': 'object', 'subtype': 'internal#scopeList'}):
+            self.session.request.return_value = {'internalProperties': [{'name': '[[Scopes]]', 'value': value}]}
+            with self.subTest(value=value), self.assertRaises(inspector.InspectorError):
+                reader.scopes(function)
+        self.assertTrue(all(c.args[0] == 'Runtime.getProperties' for c in self.session.request.call_args_list))
+
+    def test_scope_index_must_reference_internal_scope(self):
+        reader = self.reader([])
+        function = {'type': 'function', 'objectId': 'fn'}
+        self.session.request.side_effect = [
+            {'internalProperties': [{'name': '[[Scopes]]', 'value': {'type': 'object', 'subtype': 'internal#scopeList', 'objectId': 'scopes'}}]},
+            {'result': [{'name': '0', 'value': {'type': 'object', 'objectId': 'ordinary'}}]}
+        ]
+        with self.assertRaises(inspector.InspectorError) as error:
+            reader.follow_scope(function, '/0/secret')
+        self.assertEqual(error.exception.kind, 'InspectorScopeRefused')
+        self.assertEqual(self.session.request.call_count, 2)
+
     def test_large_text_is_bounded(self):
         result = self.reader([]).read({'type': 'string', 'value': '中文' * 1000})
         self.assertEqual(result['length'], 2000)
@@ -374,6 +436,20 @@ class LiveV8Tests(unittest.TestCase):
         via_path = inspector.inspect(self.url, 'fixture', path='/danger', context_id=self.context)
         self.assertEqual(via_path['error_type'], 'InspectorReadRefused')
         self.assertEqual(self.snapshot(path='/calls')['value'], before)
+
+    def test_real_closure_scopes_read_without_invoking_function(self):
+        summary = inspector.inspect(self.url, 'fixture.closure', context_id=self.context, list_scopes=True)
+        self.assertEqual(summary['status'], 'ok', summary)
+        selected = [s for s in summary['scopes'] if s['description'] == 'Closure']
+        self.assertEqual(len(selected), 1, summary)
+        pointer = '/' + str(selected[0]['index']) + '/hiddenState'
+        state = inspector.inspect(self.url, 'fixture.closure', context_id=self.context, scope_paths=[pointer], depth=2)
+        self.assertEqual(state['status'], 'ok', state)
+        props = {p['name']: p['data'] for p in state['data']['properties']}
+        self.assertEqual(props['selected']['value'], 202)
+        self.assertEqual([p['data']['value'] for p in props['items']['properties']], [101, 202, 303])
+        self.assertEqual(state['cleanup']['object_group'], 'released')
+        self.assertEqual(self.snapshot(path='/calls')['value'], 0)
 
     def test_real_proxy_refused_and_session_remains_usable(self):
         self.assertEqual(self.snapshot(path='/proxy')['expansion'], 'unsupported_collection_or_proxy')
