@@ -155,6 +155,18 @@ actor.set_editor_property('property_name', new_value)
 
 适用于已启用兼容 Chrome DevTools Protocol（CDP）的本地运行时。它是本地调试通道，不是 Python Remote Execution 的 JS 功能；无需为只读取数改业务 bundle。只操作当前用户授权的项目调试实例，不扫描其它机器或强抢已占用的调试连接。
 
+### 通用只读对象检查（无需项目接入代码）
+
+- 可选依赖：`python -m pip install -r skills/ue-editor/requirements-inspector.txt`（仓库根执行）；没有依赖时返回DependencyMissing，原有UE功能不受影响。
+- 本地CLI：`python scripts/ue_cli.py inspector contexts --url=ws://127.0.0.1:<port>/<target>`；按返回上下文选择，再 `inspector inspect --url=<明确本地WS地址> --context=<id> --expression=globalThis.AppState --path=/items/0 --depth=2 --limit=10`。不要把本地Inspector脚本通过UE的exec执行，不自动扫描端口或选择目标。
+- 只接受明确loopback IP的ws地址，禁用环境代理和重定向。全局根引用只允许标识符/属性/数字索引/JSON字符串索引；仅对globalThis做 `Runtime.evaluate` 且强制 `throwOnSideEffect=true`，根引用与后续path逐段按own描述符读取。不存在的全局、词法绑定、私有模块/闭包不可达就报缺失，不require、不创建实例、不调用业务方法。Accessor仅报告，不调用纯getter或有副作用getter；保护不支持也不降级重试。
+- `--path`为JSON pointer（最多16段），仅own数据字段，不走原型、getter或Proxy；普通对象及数组支持有界展开，Map/Set/WeakMap/Proxy本批不展开且不能经path绕过。`bigint/NaN/Infinity/-0`保留CDP类型化表示，不转损失精度的数值；数组空洞不当undefined值，非索引属性省略数另列，前/后采样与深度截断明确标记。
+- `--depth` 0~3、`--limit` 1~100、最多200展开节点，文字预览512字符。协议消息接收后检查2MiB上限（不是WebSocket分片传输层内存保证），成功结果超过64KiB报OutputLimit；先缩path/深度/样本，不扩大所有默认输出。getProperties协议会一次枚举该对象own属性，分页只限制返回展开，不保证枚举成本按limit缩小；大对象可拒绝，不能宣称恒定时间取任意列表。
+- `--timeout` 1~60秒包含连接/请求/释放的总预算并预留清理时间；本次对象组finally释放，失败/未确认单独报出，只关闭自己的连接。超时查询不重发，清理能跳过本次已知迟到响应等待release确认；未知响应ID拒绝。不发送Debugger.enable/断点/pause/resume，不能检查或恢复别人的暂停；已知被占用的端口不尝试抢占，也不保证所有运行时支持多调试连接。
+- 该入口是读取已可达对象，不是webpack模块目录或业务断言。真实Node/V8夹具验证覆盖数据/分页/循环/大整数、Accessor拒绝及计数不变；项目Puerts上下文和业务可达性需另验，不用通用夹具成功冒充项目打通。
+
+### 必要时的调用帧诊断（独立于上述只读CLI）
+
 1. **确认目标**：先 `exec --action pie worlds` 选客户端，再从目标 GameInstance 的已公开属性、项目配置或启动日志确认调试端口。查 `http://127.0.0.1:<端口>/json/list`，使用实际返回/实现提供的 WebSocket 地址；多 PIE 不假定端口相同，配置和启用条件属于项目 Reference。
 2. **建立连接**：复用本地已有 WebSocket 工具/依赖。多行 Node 探针写本地 `.cjs` 文件，不堆 `node -e` 引号，也不交给只执行 Python 的 `exec --file`。CDP 请求用独立 id 对应响应，检查协议 error 与 `exceptionDetails`；连接成功不等于表达式成功。
 3. **先看已有上下文**：用 `Runtime.enable` / `Debugger.enable` 获得实际执行上下文与 `Debugger.scriptParsed` 的已加载脚本。全局求值指定已确认上下文；不存在的全局变量、空 `require.cache` 不证明业务模块未加载。不要为找对象 `require` 旧散装文件、重建模块或猜转译后的导入名，以免创建第二套实例。

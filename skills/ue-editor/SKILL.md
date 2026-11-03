@@ -24,6 +24,7 @@ python scripts/ue_cli.py sequence --file <name.sequence.json> # 一次调用逐�
 python scripts/ue_cli.py screenshot --pie --name=<语义名> --archive=<目录> # 一次截图裁剪与归档；也可 --widget / --rect
 python scripts/ue_cli.py log mark/read/wait --file <日志路径>   # 本地日志观察，不经过编辑器
 python scripts/ue_cli.py discover                              # 确认编辑器在线
+python scripts/ue_cli.py inspector contexts|inspect --url=<本地WS地址> # 通用JS对象检查，不加载业务模块；用法见editor_tools.md
 ```
 
 - 多行代码写成 `.py` 用 `--file`；`exec` 成功时直接输出脚本 `print` 的文本，失败时输出 JSON 且退出码为 1。

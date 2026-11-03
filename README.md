@@ -68,6 +68,7 @@ python install.py --uninstall --skills ~/.codebuddy/skills --rules ~/.codebuddy/
 2. 编译插件：只改函数体时，编辑器开着用 Live Coding（`Ctrl+Alt+F11`，改动文件少于 100 个，不用重启）；首次安装或新增 `UFUNCTION` 时，打开 `.uproject` 按提示重建，或关编辑器执行
    `Engine/Build/BatchFiles/Build.bat <工程名>Editor Win64 Development -Project="<.uproject 路径>" -WaitMutex`。
 3. 截图功能依赖 `pip install pywin32 pillow`（仅 Windows）。
+4. 本地CDP对象检查可选依赖：`python -m pip install -r skills/ue-editor/requirements-inspector.txt`。`ue_cli.py inspector contexts|inspect`直接连接明确授权的loopback WebSocket，无需修改项目TS或编译插件；仅检查已可达全局对象的own数据属性，不加载模块/调用getter/暂停运行时。详见Skill的`references/editor_tools.md`。
 
 插件仅编辑器使用（`Type: Editor`），不进入打包产物；工程用版本控制时，可把 `Plugins/AgentTools/` 加入忽略列表。
 

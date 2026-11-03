@@ -9,6 +9,7 @@ UE Editor CLI - Agent 通过 shell 调用 UE 编辑器的命令行接口。
   python ue_cli.py exec --action <name> [脚本参数...] 在编辑器内执行 actions/<name>.py 入口脚本
   python ue_cli.py screenshot [--rect=x,y,w,h]       截取 UE 编辑器窗口（本地 Win32，不经过编辑器）
   python ue_cli.py log mark/read/wait --file <path>  本地日志基线、增量读取和等待
+  python ue_cli.py inspector contexts|inspect --url <ws>  本地CDP对象检查，不执行项目脚本
   python ue_cli.py sequence --file <steps.json>     跨帧步骤清单；内置清单也可 --action <name>
 
 lib/ 是编辑器内可 import 的模块（ue_input / ue_wbp / ue_common），工程 .codebuddy/ue-editor/lib/ 同理；每次执行前自动加进 sys.path。
@@ -689,6 +690,17 @@ def cmd_log(args):
         sys.exit(1)
 
 
+def cmd_inspector(args):
+    import ue_inspector
+    result = ue_inspector.inspect(args.url, expression=getattr(args, 'expression', None),
+                                  context_id=getattr(args, 'context', None), path=getattr(args, 'path', ''),
+                                  depth=getattr(args, 'depth', 1), offset=getattr(args, 'offset', 0),
+                                  limit=getattr(args, 'limit', 20), timeout=args.timeout)
+    _print_json(result)
+    if result['status'] != 'ok':
+        sys.exit(1)
+
+
 def _widget_rect(args, bridge=None):
     """在编辑器里按 Locator 查控件，返回第 --index 个命中的桌面矩形；失败返回错误 dict。"""
     expr = 'unreal.AgentSlateDriverFunctionLib.find_widgets(%r, %r)' % (args.widget, args.window or '')
@@ -893,6 +905,20 @@ def main():
     p_wait.add_argument('--wait', type=int, default=60, help='最长等待秒数 (默认 60)')
     p_wait.add_argument('--lines', type=int, default=40, help='最多输出行数 (1~200，默认 40)')
 
+    p_inspector = sub.add_parser('inspector', allow_abbrev=False, help='本地CDP上下文与对象检查，不暂停或加载业务模块')
+    inspector_sub = p_inspector.add_subparsers(dest='inspector_command', required=True)
+    for mode in ('contexts', 'inspect'):
+        command = inspector_sub.add_parser(mode, allow_abbrev=False)
+        command.add_argument('--url', required=True, help='明确授权的本地ws://127.0.0.1:<port>/<target>，不猜端口或扫描')
+        command.add_argument('--timeout', type=float, default=8, help='连接/读取/清理总预算1~60秒')
+        if mode == 'inspect':
+            command.add_argument('--expression', required=True, help='已有对象的全局引用/属性路径，强制副作用检查，不支持函数调用')
+            command.add_argument('--context', type=int, default=None, help='执行上下文ID，多个上下文必须选择')
+            command.add_argument('--path', default='', help='根对象下的JSON pointer，如/items/0/name，仅数据属性')
+            command.add_argument('--depth', type=int, default=1, help='展开深度0~3，最多200节点')
+            command.add_argument('--offset', type=int, default=0, help='属性或数组索引采样起点')
+            command.add_argument('--limit', type=int, default=20, help='每层最多1~100属性/项')
+
     # screenshot
     p_ss = sub.add_parser('screenshot', parents=[parent_parser], help='截取 UE 编辑器窗口（Win32 抓取，不阻塞编辑器）')
 
@@ -942,9 +968,9 @@ def main():
 
     # 参数解析与命令分派
     args, extra = parser.parse_known_args()
-    if args.timeout is not None and args.timeout <= 0:
+    if getattr(args, 'timeout', None) is not None and args.timeout <= 0:
         parser.error('--timeout must be positive')
-    if args.node is not None and not args.node.strip():
+    if getattr(args, 'node', None) is not None and not args.node.strip():
         parser.error('--node cannot be empty')
     if args.subcommand in ('exec', 'sequence'):
         if args.ui_summary and not args.observe_ui:
@@ -976,7 +1002,8 @@ def main():
         return
     if extra:
         parser.error('unrecognized arguments: ' + ' '.join(extra))
-    {'discover': cmd_discover, 'screenshot': cmd_screenshot, 'log': cmd_log, 'sequence': cmd_sequence}[args.subcommand](args)
+    {'discover': cmd_discover, 'screenshot': cmd_screenshot, 'log': cmd_log, 'sequence': cmd_sequence,
+     'inspector': cmd_inspector}[args.subcommand](args)
 
 
 if __name__ == '__main__':
