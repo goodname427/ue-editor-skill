@@ -14,6 +14,7 @@ import threading
 import logging
 import configparser
 import glob
+import math
 
 # ============================================================
 # 协议常量 (与 remote_execution.py 保持一致)
@@ -190,6 +191,7 @@ class UEBridge:
         self._listen_thread = None
         self._running = False
         self._remote_nodes = {}
+        self._discovery_deadline = None
         self._nodes_lock = threading.RLock()
 
         self._cmd_listen_sock = None
@@ -199,32 +201,43 @@ class UEBridge:
     # ----------------------------------------------------------
     # 节点发现
     # ----------------------------------------------------------
-    def discover(self, timeout=DEFAULT_DISCOVER_TIMEOUT):
-        """发现本地运行的 UE 编辑器实例，返回节点列表。"""
+    def discover(self, timeout=DEFAULT_DISCOVER_TIMEOUT, remote_node_id=None):
+        """完整等待有界发现窗口；显式目标只在该节点已回复时提前返回，不代表完整清单。"""
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+            return dict(_error('DiscoverArguments', '发现超时须为有限正数。'), command_sent=False)
+        if remote_node_id is not None and (not isinstance(remote_node_id, str) or not remote_node_id.strip()):
+            return dict(_error('DiscoverArguments', '显式节点ID不能为空。'), command_sent=False)
+        started = time.monotonic()
+        deadline = started + timeout
+        self._discovery_deadline = deadline
+        targeted = False
         try:
-            self._start_broadcast()
-            deadline = time.time() + timeout
-            while time.time() < deadline:
-                time.sleep(0.05)
-                with self._nodes_lock:
-                    if self._remote_nodes:
+            try:
+                self._start_broadcast()
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         break
-            self._stop_broadcast()
+                    with self._nodes_lock:
+                        if remote_node_id and remote_node_id in self._remote_nodes:
+                            targeted = True
+                            break
+                    time.sleep(min(0.05, remaining))
+            finally:
+                self._stop_broadcast()
             with self._nodes_lock:
-                nodes = []
-                for nid, ndata in self._remote_nodes.items():
-                    node = dict(ndata)
-                    node['node_id'] = nid
-                    nodes.append(node)
+                nodes = [dict(ndata, node_id=nid) for nid, ndata in sorted(self._remote_nodes.items())]
+            metadata = {'discovery_complete': not targeted, 'discovery_waited': round(time.monotonic() - started, 3),
+                        'coverage': 'Nodes that replied within the discovery window; not a process inventory.'}
             if not nodes:
-                return _error(
-                    'NoEditorFound',
-                    '未发现任何运行中的 UE 编辑器实例。',
-                    '请确认编辑器已运行且启用了 Python Remote Execution (bRemoteExecution=True)。',
-                )
-            return _ok(nodes=nodes)
+                return dict(_error('NoEditorFound', '未发现可远控的 UE 编辑器节点。',
+                                   '确认进程与 Python Remote Execution 配置；缺少回复不证明编辑器进程不存在。'),
+                            command_sent=False, **metadata)
+            return _ok(nodes=nodes, **metadata)
         except Exception as e:
-            return _error('DiscoverError', str(e))
+            return dict(_error('DiscoverError', str(e)), command_sent=False)
+        finally:
+            self._discovery_deadline = None
 
     def _start_broadcast(self):
         self._remote_nodes = {}
@@ -281,7 +294,8 @@ class UEBridge:
                     if m.from_bytes(data) and m.passes_filter(self._node_id):
                         if m.type_ == _TYPE_PONG:
                             with self._nodes_lock:
-                                self._remote_nodes[m.source] = m.data or {}
+                                if self._running and (self._discovery_deadline is None or time.monotonic() < self._discovery_deadline):
+                                    self._remote_nodes[m.source] = m.data or {}
             except socket.timeout:
                 pass
             except Exception:
@@ -295,11 +309,10 @@ class UEBridge:
     # 连接管理
     # ----------------------------------------------------------
     def connect(self, remote_node_id=None, timeout=DEFAULT_DISCOVER_TIMEOUT):
-        """连接到指定（或自动发现的第一个）UE 编辑器节点。"""
-        # 发现节点
-        disc = self.discover(timeout)
+        """只自动选择唯一回复节点；多节点必须显式指定，缺失目标不回退到其它实例。"""
+        disc = self.discover(timeout, remote_node_id=remote_node_id)
         if disc['status'] != 'ok':
-            return disc
+            return dict(disc, command_sent=False)
         nodes = disc['nodes']
 
         if remote_node_id:
@@ -309,7 +322,12 @@ class UEBridge:
                     target = n
                     break
             if not target:
-                return _error('NodeNotFound', f'未找到节点 {remote_node_id}。', '可用节点: ' + ', '.join(n['node_id'] for n in nodes))
+                return dict(_error('NodeNotFound', f'未找到节点 {remote_node_id}。',
+                                   '不自动切换实例；重新发现并确认目标节点。'), nodes=nodes, command_sent=False)
+        elif len(nodes) != 1:
+            return dict(_error('AmbiguousEditor', '发现多个可远控编辑器节点，拒绝自动选择。',
+                               '从 nodes 中确认目标，使用 --node=<node_id>；不要按首个回复或窗口标题猜实例。'),
+                        nodes=nodes, command_sent=False)
         else:
             target = nodes[0]
 
@@ -320,6 +338,7 @@ class UEBridge:
             try:
                 return self._open_command_connection(target_id)
             except Exception as e:
+                self.disconnect()
                 logger.warning(f'连接尝试 {attempt+1}/{DEFAULT_MAX_RETRIES} 失败: {e}')
                 if attempt == DEFAULT_MAX_RETRIES - 1:
                     return dict(_error('ConnectionFailed', f'连接节点 {target_id} 失败（已重试 {DEFAULT_MAX_RETRIES} 次）: {e}',
@@ -342,8 +361,8 @@ class UEBridge:
         self._cmd_listen_sock.settimeout(5)
 
         # 通过 UDP 广播 open_connection 请求
-        self._start_broadcast()
         try:
+            self._start_broadcast()
             for _ in range(6):
                 open_msg = _Message(_TYPE_OPEN_CONNECTION, self._node_id, remote_node_id, {
                     'command_ip': self._command_endpoint[0],

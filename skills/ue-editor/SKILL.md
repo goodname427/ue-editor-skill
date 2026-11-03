@@ -30,6 +30,7 @@ python scripts/ue_cli.py discover                              # 确认编辑器
 - 常用操作先找入口（`exec --action`）：`api`（API 内省）、`pie`、`open_asset`、`wbp_edit`（改 WBP 与编译保存）、`asset_move`（批量移动资产）；界面兜底用 `ui`（查看与操作界面，含点击、长按、按住/抬起、拖动、输入）。用法见各脚本 docstring。
 - 自己写脚本时 `import ue_input` / `ue_wbp`（Skill lib，CLI 自动加进 `sys.path`），不要直接拼 C++ 接口。
 - 返回 `Timeout` 时编辑器可能仍在执行，**不要重发**。
+- `discover` 缺少回复不代表进程没运行；多节点拒绝自动选择，确认后显式 `--node=<id>`（不可跨重启复用），不要据无回复重复启动编辑器。
 
 ## 分层
 

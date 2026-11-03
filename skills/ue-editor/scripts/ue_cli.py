@@ -141,18 +141,18 @@ def _make_bridge(args):
 
 
 def _discover_timeout(args):
-    """--timeout 主要控制命令等待；发现阶段正常 1 秒内完成，封顶 5 秒避免编辑器不在线时空等。"""
+    """发现窗口封顶5秒；自动选择等待完整窗口，显式node可在目标回复后提前完成。"""
     return min(args.timeout or DISCOVER_TIMEOUT, DISCOVER_TIMEOUT)
 
 
 def _run(args, action):
-    """连接编辑器 → action(bridge) → 断开；未发现节点时额外发现一次，不重发已执行的命令。"""
+    """连接编辑器 → action(bridge) → 断开；缺少回复不代表无进程，多节点拒绝自动选择，不重发命令。"""
     bridge = _make_bridge(args)
     discover_timeout = _discover_timeout(args)
     try:
         conn = bridge.connect(remote_node_id=args.node, timeout=discover_timeout)
         if conn.get('error_type') == 'NoEditorFound':
-            print('[warning] 未发现编辑器，额外发现一次（至多 %ss）。' % discover_timeout, file=sys.stderr)
+            print('[warning] 未收到可远控节点回复，额外发现一次（至多 %ss）；不代表编辑器进程未运行。' % discover_timeout, file=sys.stderr)
             conn = bridge.connect(remote_node_id=args.node, timeout=discover_timeout)
         if conn['status'] != 'ok':
             return dict(conn, command_sent=False)
@@ -615,8 +615,10 @@ def cmd_sequence(args):
 
 def cmd_discover(args):
     bridge = _make_bridge(args)
-    result = bridge.discover(timeout=args.timeout or DISCOVER_TIMEOUT)
+    result = bridge.discover(timeout=args.timeout if args.timeout is not None else DISCOVER_TIMEOUT)
     _print_json(result)
+    if result['status'] != 'ok':
+        sys.exit(1)
 
 
 def cmd_exec(args, tokens):
@@ -940,6 +942,10 @@ def main():
 
     # 参数解析与命令分派
     args, extra = parser.parse_known_args()
+    if args.timeout is not None and args.timeout <= 0:
+        parser.error('--timeout must be positive')
+    if args.node is not None and not args.node.strip():
+        parser.error('--node cannot be empty')
     if args.subcommand in ('exec', 'sequence'):
         if args.ui_summary and not args.observe_ui:
             parser.error('--ui-summary requires --observe-ui')
