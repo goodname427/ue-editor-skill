@@ -19,8 +19,8 @@
 | 函数 | 返回 |
 |---|---|
 | `widgets(path)` | 平铺列表，按遍历顺序：`[{name, type, is_variable, visibility, parent, child_index}]`，`parent` 为空的是根 |
-| `root(path)` | 根控件名 |
-| `tree(path)` | 嵌套树：`{name, type, is_variable, visibility, children}`，子节点按 `child_index` 排序 |
+| `root(path)` | 第一个无 parent 的控件名；无根时报错，不用于枚举多根 |
+| `tree(path)` | 单根返回 dict，零根返回 `[]`，多根返回根节点 list；节点为 `{name, type, is_variable, visibility, children}`，子节点按 `child_index` 排序。遍历前用 `roots = value if isinstance(value, list) else [value]` 归一化 |
 | `variables(path)` | 勾了"是变量"的控件：`[{name, type}]` |
 | `is_variable(path, name)` | `bool` |
 | `props(path, name, slot=False)` | `{属性名: UE 文本}`，包含所有可编辑和蓝图可见的属性，`'__type__'` 是控件类名；`slot=True` 时读控件所在插槽（如 `CanvasPanelSlot` 的 `LayoutData`、`ZOrder`），根控件没有插槽会报错 |

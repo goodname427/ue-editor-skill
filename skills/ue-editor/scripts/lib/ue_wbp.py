@@ -106,7 +106,7 @@ def _asset_name(path):
 
 def widget_tree(path):
     """WidgetTree 对象；必须先 load_asset，find_object 才找得到。"""
-    unreal.EditorAssetLibrary.load_asset(path.split('.')[0])
+    _blueprint(path)
     tree = unreal.find_object(None, '%s.%s:WidgetTree' % (path.split('.')[0], _asset_name(path)))
     if tree is None:
         raise RuntimeError('not a WidgetBlueprint asset: ' + path)
@@ -351,11 +351,9 @@ def remove_widget(path, name):
 
 def save(path):
     """编译并保存，返回是否保存成功（只读资产会失败）。"""
-    bp = unreal.EditorAssetLibrary.load_asset(path.split('.')[0])
-    if bp is None:
-        raise RuntimeError('asset not found: ' + path)
+    bp = _blueprint(path)
     unreal.BlueprintEditorLibrary.compile_blueprint(bp)
-    return bool(unreal.EditorAssetLibrary.save_asset(path.split('.')[0], only_if_is_dirty=False))
+    return bool(unreal.EditorLoadingAndSavingUtils.save_packages([bp.get_outer()], False))
 
 
 # ---------- 蓝图数据 ----------
@@ -429,7 +427,7 @@ def function(path, name):
 
 
 def _blueprint(path):
-    bp = unreal.EditorAssetLibrary.load_asset(path)
+    bp = unreal.load_asset(path)
     if not isinstance(bp, unreal.WidgetBlueprint):
         raise RuntimeError('not a WidgetBlueprint: ' + path)
     return bp
